@@ -1,0 +1,72 @@
+train:
+  seed: 0
+  total_steps: 40
+  max_episode_steps: 20
+  log_interval: 20
+  save_interval: 1000
+  eval_interval: 500
+  eval_episodes: 0
+  record_interval: 20
+  device: cpu
+  multi_task: false
+env:
+  type: dmcontrol
+  name: cartpole_swingup_image
+  domain_name: cartpole
+  task_name: swingup
+  observation:
+    type: image
+    num_cams: 1
+  action:
+    clip: true
+    normalize: true
+  render:
+    enabled: false
+    save_frames: false
+    save_video: false
+    height: 64
+    width: 64
+    camera_id: 0
+    backend: egl
+  isaac:
+    task_name: null
+    num_envs: 1
+    headless: true
+    create_cam: null
+policy:
+  type: dreamerv3
+  name: dreamerv3_image_smoke
+  checkpoint:
+    load: false
+    path: policy.ckpt
+    save: true
+  dreamerv3:
+    device: cpu
+    batch_size: 2
+    seq_len: 4
+    warmup_steps: 8
+    train_every: 1
+    train_ratio: 1.0
+    max_updates_per_step: 1
+    replay_capacity: 500
+    embed_dim: 64
+    deter_dim: 64
+    stoch_dim: 8
+    stoch_classes: 8
+    hidden_dim: 128
+    num_layers: 2
+    actor_hidden_dim: 128
+    actor_num_layers: 2
+    value_hidden_dim: 128
+    value_num_layers: 2
+    imagination_horizon: 5
+    twohot_bins: 63
+    use_symlog_obs: false
+    use_symlog_reward: true
+    use_twohot_reward: true
+    use_twohot_value: true
+    use_slow_value: true
+    repval_loss: true
+    aux:
+      predict_grasp: false
+      contact_num_classes: null

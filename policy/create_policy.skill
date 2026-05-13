@@ -1,0 +1,244 @@
+---
+name: create-policy-convention
+description: Use this skill when creating or refactoring policies under `policy/`.
+---
+
+# Bring Your Own Policy (Project Convention)
+
+本规范用于当前仓库的策略接入，不是外部插件系统。策略通过 `policy/<policy_name>/` + `policy/make_policy.py` 手动接入。
+
+## 1) 创建策略目录
+
+以 `my_policy` 为例：
+
+```text
+policy/my_policy/
+├── __init__.py
+├── README.md
+├── ARCHITECTURE.md
+├── config.py
+├── processor.py
+├── my_policy_policy_impl.py
+├── my_policy_agent.py
+├── my_policy_model.py
+└── test_policy.py
+```
+
+说明：
+
+- 简单策略（如 random）可省略 `agent.py`、`model.py`
+- 复杂策略（如 dreamerv3）建议完整保留
+
+## 2) `config.py` 统一配置入口
+
+目标：不要在多处直接读 YAML 裸字典。
+
+要求：
+
+- 定义 dataclass（含默认值）
+- 在 `validate()` 做参数检查
+- 提供 `build_<policy>_config(policy_config: dict)` 构造函数
+- 其他文件统一使用 `self.cfg.xxx`，禁止散落 `config["my_policy"]["xxx"]`
+
+## 3) `processor.py` 负责 obs/action 变换
+
+目标：把预处理/后处理从 wrapper 拆出去。
+
+职责：
+
+- `preprocess_obs(obs)`：raw obs -> model input
+- `postprocess_action(action)`：model action -> env action
+
+典型图像逻辑（放在 processor，不放在 env、不塞满 policy_impl）：
+
+- resize
+- normalize
+- HWC/CHW 转换
+- multi-camera 拼接
+- tensor/device 转换
+
+## 4) `model.py` 只放网络结构
+
+`model.py` 只负责 `nn.Module` 和 `forward`。
+
+禁止放入：
+
+- YAML 读取
+- checkpoint 组织
+- replay 写入
+- env/runner 逻辑
+- 绘图或日志写文件逻辑
+
+## 5) `agent.py` 负责算法逻辑
+
+`agent.py` 可以负责：
+
+- optimizer
+- loss
+- backward/update
+- replay 采样（如需要）
+- save/load（模型与优化器状态）
+
+`agent.py` 不应知道：
+
+- runner 如何绘图
+- exam 输出目录组织
+
+## 6) `*_policy_impl.py` 是 runner 可见边界
+
+runner 只与 policy wrapper 交互：
+
+- `policy.act(obs)`
+- `policy.update(step_batch)`
+- `policy.reset()`
+- `policy.save(path)`
+- `policy.load(path)`
+
+调用链应保持清晰：
+
+```text
+runner -> policy.act(obs)
+       -> processor.preprocess_obs
+       -> agent/model
+       -> processor.postprocess_action
+```
+
+训练链：
+
+```text
+runner -> policy.update(step_batch)
+       -> agent.update(...)
+       -> unified metrics payload
+```
+
+## 7) `__init__.py` 导出公共类
+
+最小要求：
+
+```python
+from .my_policy_policy_impl import MyPolicy
+__all__ = ["MyPolicy"]
+```
+
+## 8) 修改 `policy/make_policy.py`
+
+使用手动分支接入即可：
+
+- 读取 `policy.type`
+- 构造对应 policy class
+- 只做对象创建，不写算法逻辑
+
+`make_policy.py` 禁止承载：
+
+- 网络结构定义
+- 优化器/loss/replay 逻辑
+- obs 预处理实现
+
+## 9) 统一 `act/update/forward` 语义
+
+`act(obs)`：
+
+- 推理选动作
+- 不做梯度更新
+- 可更新内部推理状态（如 latent）
+
+`update(step_batch)`：
+
+- 训练更新入口
+- 可写 replay、可反向传播
+- 必须返回统一 metrics payload
+
+`forward(batch)`：
+
+- 仅 model/agent 内部细节
+- runner 不直接调用
+
+## 10) `README.md` 内容要求
+
+至少包含：
+
+- Purpose
+- Current Status
+- Supported Observations
+- Supported Actions
+- Config Example
+- Known Limitations
+
+## 11) `ARCHITECTURE.md` 内容要求
+
+至少包含：
+
+- Overall Pipeline
+- Modules（processor/model/agent）
+- Tensor Shapes
+- Version History
+
+复杂策略（如 Dreamer）需额外记录：
+
+- encoder/RSSM/actor/value 关键维度
+- replay sequence 长度
+- 核心 loss 项
+
+## 12) 最小测试 `test_policy.py`
+
+最小覆盖：
+
+- `act()` 能输出正确形状动作
+- `update()` 返回统一 metrics payload
+
+建议命令：
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest policy/<policy_name>/test_policy.py -v
+```
+
+## Unified Metrics Payload (Mandatory)
+
+`update()` 返回结构必须是：
+
+```python
+{
+  "schema": "policy_metrics/v1",
+  "scalars": {
+    "actor_loss": 0.1,
+    "value_loss": 0.2
+  },
+  "metadata": {
+    "replay_size": 1000
+  }
+}
+```
+
+规则：
+
+- `schema` 固定为 `policy_metrics/v1`
+- `scalars` 仅允许标量数值
+- `metadata` 仅放 JSON 可序列化信息
+
+runner 从统一 JSONL 记录绘图，不硬编码算法名或 loss 名。
+
+## 最终执行顺序（Checklist）
+
+1. 创建 `policy/<policy_name>/`
+2. 写 `README.md`
+3. 写 `ARCHITECTURE.md`
+4. 写 `config.py`
+5. 写 `processor.py`
+6. 写 `model.py`
+7. 写 `agent.py`
+8. 写 `*_policy_impl.py`
+9. 在 `__init__.py` 导出类
+10. 在 `make_policy.py` 加分支
+11. 在 `exam/<name>/config.yaml` 添加 policy 配置
+12. 写 `test_policy.py`
+13. 跑 pytest
+14. 跑一个短训练 exam
+
+## 关键边界（必须遵守）
+
+- env wrapper：只提供 raw `obs/reward/done/info`
+- processor：只处理数据格式转换
+- model：只定义网络结构
+- agent：只处理算法训练/优化
+- policy_impl：只暴露 runner 接口
+- runner：只负责循环、记录、绘图，不知道具体算法内部细节
