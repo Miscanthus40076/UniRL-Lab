@@ -48,6 +48,16 @@ def validate_exam_config(config):
     if eval_interval > 0 and eval_episodes <= 0:
         raise ValueError("train.eval_interval > 0 requires train.eval_episodes > 0")
 
+    eval_visualize_episodes = int(train.get("eval_visualize_episodes", min(eval_episodes, 10)))
+    if eval_visualize_episodes < 0:
+        raise ValueError(
+            f"train.eval_visualize_episodes must be >= 0, got {eval_visualize_episodes}"
+        )
+    if eval_visualize_episodes > eval_episodes:
+        raise ValueError(
+            "train.eval_visualize_episodes must be <= train.eval_episodes"
+        )
+
     max_episode_steps = train.get("max_episode_steps")
     if max_episode_steps is not None and int(max_episode_steps) <= 0:
         raise ValueError(f"train.max_episode_steps must be > 0 when set, got {max_episode_steps}")
@@ -143,5 +153,8 @@ def eval_cfg(config):
     return {
         "enabled": episodes > 0,
         "episodes": episodes,
+        "visualize_episodes": int(train.get("eval_visualize_episodes", min(episodes, 10))),
+        "success_metric": str(train.get("eval_success_metric", "episode_return_positive")),
+        "success_threshold": float(train.get("eval_success_threshold", 0.0)),
         "fps": 20,
     }

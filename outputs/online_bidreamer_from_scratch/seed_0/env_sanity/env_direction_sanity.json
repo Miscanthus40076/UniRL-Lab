@@ -1,0 +1,38 @@
+{
+  "seed": 0,
+  "output_dir": "outputs/online_bidreamer_from_scratch/seed_0/env_sanity",
+  "forward": {
+    "direction": "forward",
+    "wrapper_direction": "forward",
+    "reset_images": [
+      "outputs/online_bidreamer_from_scratch/seed_0/env_sanity/forward_reset_000.png",
+      "outputs/online_bidreamer_from_scratch/seed_0/env_sanity/forward_reset_001.png"
+    ],
+    "rollout_steps": 50,
+    "reward_sum": 0.0,
+    "success_count": 0,
+    "done_count": 0,
+    "all_info_directions_match": true,
+    "rollout_gif": "outputs/online_bidreamer_from_scratch/seed_0/env_sanity/forward_random_rollout.gif"
+  },
+  "reverse": {
+    "direction": "reverse",
+    "wrapper_direction": "reverse",
+    "reset_images": [
+      "outputs/online_bidreamer_from_scratch/seed_0/env_sanity/reverse_reset_000.png",
+      "outputs/online_bidreamer_from_scratch/seed_0/env_sanity/reverse_reset_001.png"
+    ],
+    "rollout_steps": 50,
+    "reward_sum": 4.0,
+    "success_count": 4,
+    "done_count": 0,
+    "all_info_directions_match": true,
+    "rollout_gif": "outputs/online_bidreamer_from_scratch/seed_0/env_sanity/reverse_random_rollout.gif"
+  },
+  "checks": {
+    "forward_wrapper_direction_ok": true,
+    "reverse_wrapper_direction_ok": true,
+    "forward_info_direction_ok": true,
+    "reverse_info_direction_ok": true
+  }
+}

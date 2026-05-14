@@ -1,11 +1,14 @@
-rain:
+train:
   seed: 0
   total_steps: 30000
   max_episode_steps: 500
   log_interval: 200
   save_interval: 5000
   eval_interval: 5000
-  eval_episodes: 1
+  eval_episodes: 1000
+  eval_visualize_episodes: 10
+  eval_success_metric: episode_return_positive
+  eval_success_threshold: 0.0
   record_interval: 200
   device: cuda
   multi_task: false
@@ -44,7 +47,7 @@ policy:
     save: true
   dreamerv3:
     device: cuda
-    allow_cpu_fallback: true
+    allow_cpu_fallback: false
     batch_size: 16
     seq_len: 16
     warmup_steps: 1000

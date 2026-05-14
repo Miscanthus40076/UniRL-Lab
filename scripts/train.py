@@ -113,6 +113,9 @@ def train_task(config, exam_dir, task):
     save_interval = int(cfg.get("save_interval", 0))
     eval_interval = int(cfg.get("eval_interval", 0))
     eval_episodes = int(cfg.get("eval_episodes", 0))
+    eval_visualize_episodes = int(cfg.get("eval_visualize_episodes", min(eval_episodes, 10)))
+    eval_success_metric = str(cfg.get("eval_success_metric", "episode_return_positive"))
+    eval_success_threshold = float(cfg.get("eval_success_threshold", 0.0))
 
     output_dir = output_dir_for_task(exam_dir, config, task["name"])
     metrics_path = output_dir / "metrics.csv"
@@ -193,14 +196,18 @@ def train_task(config, exam_dir, task):
                     eval_env = make_env(_eval_env_config(task["env"]))
                 eval_dir = output_dir / "eval" / f"step_{step:07d}"
                 print(f"Running evaluation at step={step} ...")
-                run_policy_evaluation(
+                eval_result = run_policy_evaluation(
                     env=eval_env,
                     policy=policy,
                     output_dir=eval_dir,
                     eval_episodes=eval_episodes,
                     max_episode_steps=max_episode_steps,
                     gif_fps=20,
+                    visualize_episodes=eval_visualize_episodes,
+                    success_metric=eval_success_metric,
+                    success_threshold=eval_success_threshold,
                 )
+                print(f"Saved eval summary: {eval_result['summary_path']}")
                 reset = getattr(policy, "reset", None)
                 if callable(reset):
                     reset()

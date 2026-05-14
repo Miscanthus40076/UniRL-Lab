@@ -101,17 +101,22 @@ def run_task(config, exam_dir, task):
     if eval_run["enabled"] and render["enabled"]:
         env = make_env(task["env"])
         try:
-            gif_paths = run_policy_evaluation(
+            eval_result = run_policy_evaluation(
                 env=env,
                 policy=policy,
                 output_dir=output_dir / "eval",
                 eval_episodes=eval_run["episodes"],
                 max_episode_steps=max_episode_steps,
                 gif_fps=eval_run["fps"],
+                visualize_episodes=eval_run["visualize_episodes"],
+                success_metric=eval_run["success_metric"],
+                success_threshold=eval_run["success_threshold"],
             )
         finally:
             env.close()
 
+        gif_paths = eval_result["gif_paths"]
+        print(f"Saved eval summary: {eval_result['summary_path']}")
         if gif_paths:
             print("Saved eval GIFs:")
             for gif_path in gif_paths:

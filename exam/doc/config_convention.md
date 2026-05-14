@@ -14,6 +14,9 @@ train:
 
   eval_interval: 5000
   eval_episodes: 5
+  eval_visualize_episodes: 5
+  eval_success_metric: episode_return_positive
+  eval_success_threshold: 0.0
 
   record_interval: 100
 
@@ -75,6 +78,9 @@ policy:
 | `save_interval` | checkpoint 保存间隔 |
 | `eval_interval` | 每隔多少 `step` 评估一次，必须大于 0 |
 | `eval_episodes` | 每次评估跑几个 `episode`，必须大于 0 |
+| `eval_visualize_episodes` | 每次评估中实际保存 GIF 的 `episode` 数，必须小于等于 `eval_episodes` |
+| `eval_success_metric` | 成功判定方式：`episode_return_positive` / `episode_return_threshold` / `info_success` |
+| `eval_success_threshold` | 需要阈值时使用的成功阈值 |
 | `record_interval` | metrics / csv / 曲线图采样间隔 |
 | `device` | `cpu` / `cuda` |
 
@@ -122,6 +128,8 @@ policy:
 - `env.observation.num_cams = n` 表示图像模式下环境向策略提供 `n` 路相机图像。
 - 策略拿到图像后，需要自行 `reshape` / `stack` / `permute` 成自己可消费的输入格式。
 - `dmcontrol` 暂时不用 `create_cam` 逻辑，相关相机创建约定主要为 Isaac 预留。
+- `ball_in_cup` 额外支持一个本地自定义任务：`task_name: release`（或 `take_out`）。
+  它会让球初始就在杯子里，目标变成把球从杯子里拿出来，成功时 `info.success = true`。
 - Isaac 的 `create_cam` 具体实现后续再加，现阶段先在 YAML 中保留字段。
 
 ## Multi-task Example

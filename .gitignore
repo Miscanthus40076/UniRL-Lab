@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.vscode/
+
+*.pt
+policy.ckpt
+
+outputs/online_bidreamer_from_scratch/seed_0_backup_*/
+outputs/online_bidreamer_from_scratch/*/eval/**/*.gif
+outputs/online_bidreamer_from_scratch/*/env_sanity/*_random_rollout.gif
+exam/**/output/eval/**/*.gif

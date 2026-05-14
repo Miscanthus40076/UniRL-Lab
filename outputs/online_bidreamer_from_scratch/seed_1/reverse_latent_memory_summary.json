@@ -1,0 +1,19 @@
+{
+  "num_episodes": 1,
+  "num_latents": 150,
+  "feat_dim": 384,
+  "mean_nearest_distance_on_reverse": 0.012767985463142395,
+  "example_indices": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "feature_norm_mean": 1.0,
+  "feature_norm_std": 5.818769466259255e-08,
+  "distance_metric": "cosine",
+  "normalize_features": true,
+  "feature_whiten": false,
+  "fallback_used": true
+}
