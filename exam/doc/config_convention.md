@@ -4,10 +4,16 @@
 
 ```yaml
 train:
+  trainer: online_policy
   seed: 0
   total_steps: 10000
   max_episode_steps: null
   multi_task: false
+  bidirectional:
+    enabled: false
+    stage: actor_value_with_prior
+    forward_env: {}
+    reverse_env: {}
 
   log_interval: 100
   save_interval: 1000
@@ -70,10 +76,15 @@ policy:
 
 | Field | Description |
 | --- | --- |
+| `trainer` | 训练入口类型：默认 `online_policy`，双向训练可用 `bidirectional` / `bidreamer` |
 | `seed` | 随机种子 |
 | `total_steps` | 总训练步数 |
 | `max_episode_steps` | 单 `episode` 最大步数，可选 |
 | `multi_task` | 是否启用多任务训练；为 `true` 时按 `env.tasks` 逐任务独立训练 |
+| `bidirectional.enabled` | 是否启用双向训练模式 |
+| `bidirectional.stage` | 双向训练阶段，当前支持 `world_model_only` / `actor_value_no_prior` / `actor_value_with_prior` |
+| `bidirectional.forward_env` | 正向训练环境覆盖项；基于顶层 `env` 深拷贝后覆盖 |
+| `bidirectional.reverse_env` | 反向训练环境覆盖项；基于顶层 `env` 深拷贝后覆盖 |
 | `log_interval` | 日志打印间隔 |
 | `save_interval` | checkpoint 保存间隔 |
 | `eval_interval` | 每隔多少 `step` 评估一次，必须大于 0 |
@@ -172,9 +183,63 @@ env:
 - 输出目录会变成 `exam/<exam_name>/output/<task_name>/...`。
 - 每个任务都从头开始训练，不会继承本次前一个任务的策略权重。
 
+## Bidirectional Example
+
+```yaml
+train:
+  trainer: bidirectional
+  seed: 0
+  bidirectional:
+    enabled: true
+    stage: actor_value_with_prior
+    forward_env:
+      name: ball_in_cup_catch
+      domain_name: ball_in_cup
+      task_name: catch
+    reverse_env:
+      name: ball_in_cup_release
+      domain_name: ball_in_cup
+      task_name: release
+
+env:
+  type: dmcontrol
+  observation:
+    type: image
+    num_cams: 1
+  action:
+    clip: true
+    normalize: true
+  render:
+    enabled: false
+    height: 64
+    width: 64
+    camera_id: 0
+    backend_priority: [egl, osmesa]
+    allow_software_render_fallback: true
+
+training:
+  total_env_steps: 100000
+  warmup_env_steps_per_direction: 1000
+  batch_size: 16
+  seq_len: 16
+  eval_interval: 1000
+  learning_rate: 3.0e-4
+  grad_clip: 100.0
+  device: cuda_if_available_else_cpu
+
+replay:
+  capacity: 100000
+```
+
+- 双向模式下，`scripts/train.py` 会实例化 `Trainer` 子类，而不是走默认的单策略在线更新循环。
+- 当前双向模式不支持 `train.multi_task = true`。
+- `train.bidirectional.forward_env` / `reverse_env` 只需要写和顶层 `env` 不同的部分；渲染、观测、动作配置会从顶层 `env` 继承。
+
 ## Note
 
 `scripts/create_exam.py`、`scripts/train.py`、`scripts/run_exam.py` 应默认使用这份结构。
-其中 `scripts/create_exam.py` 会强制生成带评估的配置，`scripts/train.py` 会按 `eval_interval` 在训练过程中执行评估并保存 GIF。
+其中 `scripts/create_exam.py` 会强制生成带评估的配置，并为每个 `exam/<name>/` 自动生成一个 `train.py`。
+`scripts/train.py` 现在只负责加载 `exam/<name>/train.py`，后者必须定义一个继承主入口 `scripts/train.py` 中 `BaseExamTrainApp` 的 `ExamTrain` 类，并在类里显式给出训练器构造逻辑。
+因此每个 exam 都是自带训练入口的自描述目录，支持直接运行 `python exam/<name>/train.py`，也支持统一入口 `python scripts/train.py <name>`。
 
 旧版 `experiment/runtime` 配置目前只作为兼容读取保留，后续应逐步淘汰。

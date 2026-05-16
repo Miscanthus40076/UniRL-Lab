@@ -31,6 +31,7 @@ class DreamerV3PolicyFolder(BasePolicy):
         self.model_cfg = build_dreamerv3_model_config(self.policy_cfg, self.action_dim, self.obs_spec)
         self.agent = DreamerV3Agent(self.model_cfg)
         self.contact_label_map: dict[str, int] = {}
+        self.last_checkpoint_load_report: dict[str, object] | None = None
 
         self._make_replay()
         self._reset_runtime_state()
@@ -139,6 +140,11 @@ class DreamerV3PolicyFolder(BasePolicy):
         self._latent_prev_action = np.zeros(self.action_dim, dtype=np.float32)
         self._episode_is_first = True
 
+    def get_diagnostics(self) -> dict[str, object]:
+        return {
+            "context": self.agent.get_context_diagnostics(),
+        }
+
     def save(self, path: str | Path):
         path = self._resolve_checkpoint_path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -158,16 +164,21 @@ class DreamerV3PolicyFolder(BasePolicy):
         payload = torch.load(self._resolve_checkpoint_path(path), map_location=self.policy_cfg.device)
         if payload.get("policy_type") != "dreamerv3":
             raise ValueError("Checkpoint is not a DreamerV3 policy checkpoint")
-
-        self.action_dim = int(payload["action_dim"])
-        self.obs_spec = DreamerObservationSpec(**payload["observation_spec"])
-
-        policy_config = {"dreamerv3": payload.get("policy_config", {})}
-        self.policy_cfg, _ = build_dreamerv3_policy_config(policy_config)
-        self.processor = DreamerV3Processor(device=self.policy_cfg.device)
-        self.model_cfg = build_dreamerv3_model_config(self.policy_cfg, self.action_dim, self.obs_spec)
-        self.agent = DreamerV3Agent.from_state_dict(payload["agent"], device=self.model_cfg.device)
+        saved_action_dim = int(payload["action_dim"])
+        saved_obs_spec = DreamerObservationSpec(**payload["observation_spec"])
+        if saved_action_dim != self.action_dim:
+            raise ValueError(f"Checkpoint action_dim={saved_action_dim} does not match current action_dim={self.action_dim}")
+        if saved_obs_spec != self.obs_spec:
+            raise ValueError(
+                f"Checkpoint observation spec {saved_obs_spec.asdict()} does not match current spec {self.obs_spec.asdict()}"
+            )
+        self.agent = DreamerV3Agent.from_state_dict(
+            payload["agent"],
+            device=self.model_cfg.device,
+            model_config=self.model_cfg,
+        )
         self.contact_label_map = dict(payload.get("contact_label_map", {}))
+        self.last_checkpoint_load_report = getattr(self.agent, "_last_load_report", None)
 
         self._make_replay()
         self._reset_runtime_state()

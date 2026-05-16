@@ -10,10 +10,11 @@ import torch
 import yaml
 
 from policy.dreamerv3.processor import DreamerV3Processor
+from src.trainers.base import Trainer
 
 from .bidirectional_agent import BidirectionalAgent
 from .bidirectional_dataset import normalize_raw_episode
-from .bidirectional_env_factory import make_bidirectional_env
+from .bidirectional_env_factory import _direction_env_config, make_bidirectional_env
 from .direction_world_model import DirectionConditionedWorldModel, DirectionWorldModelConfig
 from .env_sanity import run_env_sanity
 from .online_replay_buffer import EpisodeReplayBuffer
@@ -302,128 +303,182 @@ def _evaluate_policy(agent: BidirectionalAgent, config: dict, processor: Dreamer
         env.close()
 
 
-def train_online_bidreamer_from_scratch(
-    config_path: str | Path,
-    seed: int = 0,
-    dry_run_steps: int | None = None,
-    stage: str = "actor_value_with_prior",
-) -> dict:
-    if stage not in {"world_model_only", "actor_value_no_prior", "actor_value_with_prior"}:
-        raise ValueError(f"Unsupported stage for this phase: {stage}")
-    config = _load_yaml(config_path)
-    latent_prior_cfg = config.get("latent_prior", {})
-    latent_prior_enabled = bool(latent_prior_cfg.get("enabled", False))
-    if stage == "actor_value_no_prior" and latent_prior_enabled:
-        raise ValueError("Step 4 requires latent_prior.enabled=false")
-    if stage == "world_model_only" and latent_prior_enabled:
-        raise ValueError("world_model_only stage does not support latent_prior.enabled=true")
-    if stage == "actor_value_with_prior" and not latent_prior_enabled:
-        raise ValueError("Step 5 requires latent_prior.enabled=true")
-    _set_seed(seed)
-    device = _device_from_config(str(config["training"]["device"]))
-    output_dir = Path("outputs") / "online_bidreamer_from_scratch" / f"seed_{seed}"
-    output_dir.mkdir(parents=True, exist_ok=True)
+class BidirectionalTrainer(Trainer):
+    trainer_name = "bidirectional"
+    _supported_stages = {"world_model_only", "actor_value_no_prior", "actor_value_with_prior"}
 
-    sanity_config = dict(config)
-    sanity_config["output_dir"] = str(output_dir / "env_sanity")
-    sanity = run_env_sanity(config=sanity_config, seed=seed)
-
-    forward_env = make_bidirectional_env(config, "forward")
-    reverse_env = make_bidirectional_env(config, "reverse")
-    processor = DreamerV3Processor(device=device)
-    try:
-        forward_obs = forward_env.reset()
-        reverse_obs = reverse_env.reset()
-        obs_spec = processor.infer_observation_spec(forward_obs)
-        model = DirectionConditionedWorldModel(_infer_model_config(config, forward_obs)).to(device)
-        agent = BidirectionalAgent(
-            model=model,
-            learning_rate=float(config["training"]["learning_rate"]),
-            grad_clip=float(config["training"]["grad_clip"]),
-            actor_lr=float(config["training"].get("actor_lr", 8e-5)),
-            value_lr=float(config["training"].get("value_lr", 8e-5)),
-            actor_grad_clip=float(config["training"].get("actor_grad_clip", 100.0)),
-            value_grad_clip=float(config["training"].get("value_grad_clip", 100.0)),
-            imagination_horizon=int(config["training"].get("imagination_horizon", 15)),
-            gamma=float(config["training"].get("gamma", 0.99)),
-            lambda_=float(config["training"].get("lambda", 0.95)),
-            entropy_coef=float(config["training"].get("entropy_coef", 1e-3)),
-            actor_hidden_dim=int(config["model"].get("actor_hidden_dim", config["model"]["hidden_dim"])),
-            actor_num_layers=int(config["model"].get("actor_num_layers", 2)),
-            value_hidden_dim=int(config["model"].get("value_hidden_dim", config["model"]["hidden_dim"])),
-            value_num_layers=int(config["model"].get("value_num_layers", 2)),
-            min_std=float(config["training"].get("min_std", 0.1)),
-            max_std=float(config["training"].get("max_std", 1.0)),
-            init_std=float(config["training"].get("init_std", 1.0)),
-            imag_last=int(config["training"].get("imag_last", 0)),
-            use_twohot_value=bool(config["training"].get("use_twohot_value", True)),
-            use_slow_value=bool(config["training"].get("use_slow_value", True)),
-            slow_value_rate=float(config["training"].get("slow_value_rate", 0.02)),
-            repval_loss=bool(config["training"].get("repval_loss", False)),
-            repval_scale=float(config["training"].get("repval_scale", 0.3)),
-            use_return_norm=bool(config["training"].get("use_return_norm", True)),
-            use_advantage_norm=bool(config["training"].get("use_advantage_norm", True)),
-            norm_rate=float(config["training"].get("norm_rate", 0.01)),
-            norm_eps=float(config["training"].get("norm_eps", 1e-8)),
-            latent_prior_enabled=latent_prior_enabled,
-            latent_prior_beta=float(latent_prior_cfg.get("beta", 1.0)),
-            latent_prior_horizon=int(latent_prior_cfg.get("horizon", config["training"].get("imagination_horizon", 15))),
-            latent_prior_subgoal_step=int(latent_prior_cfg.get("subgoal_step", config.get("latent_memory", {}).get("subgoal_step", 1))),
+    def __init__(
+        self,
+        config: dict,
+        exam_dir: str | Path,
+        exam_name: str | None = None,
+        seed: int | None = None,
+        output_dir: str | Path | None = None,
+        dry_run_steps: int | None = None,
+        stage: str | None = None,
+    ):
+        super().__init__(
+            config=config,
+            exam_dir=exam_dir,
+            exam_name=exam_name,
+            seed=seed,
+            output_dir=output_dir,
         )
-        forward_replay = EpisodeReplayBuffer(direction="forward", capacity=int(config["replay"]["capacity"]))
-        reverse_replay = EpisodeReplayBuffer(direction="reverse", capacity=int(config["replay"]["capacity"]))
-        rng = np.random.default_rng(seed)
-        total_env_steps = int(dry_run_steps or config["training"]["total_env_steps"])
-        warmup_per_direction = int(config["training"]["warmup_env_steps_per_direction"])
-        batch_size = int(config["training"]["batch_size"])
-        seq_len = int(config["training"]["seq_len"])
-        eval_interval = int(config["training"]["eval_interval"])
-        latent_prior_start = int(latent_prior_cfg.get("start_after_env_steps", 10000))
-        memory_update_interval = int(latent_prior_cfg.get("memory_update_interval", eval_interval))
-        latent_prior_vis_limit = int(latent_prior_cfg.get("num_visualize_neighbors", 8))
+        self.dry_run_steps = dry_run_steps
+        self.stage = str(stage or self._stage_from_config())
+        if self.stage not in self._supported_stages:
+            raise ValueError(f"Unsupported stage for this phase: {self.stage}")
 
-        for _ in range(warmup_per_direction):
-            forward_obs = _collect_one_step_random(forward_env, forward_replay, forward_obs, processor, obs_spec, rng)
-        for _ in range(warmup_per_direction):
-            reverse_obs = _collect_one_step_random(reverse_env, reverse_replay, reverse_obs, processor, obs_spec, rng)
+    @classmethod
+    def from_config_path(
+        cls,
+        config_path: str | Path,
+        seed: int = 0,
+        dry_run_steps: int | None = None,
+        stage: str | None = None,
+        output_dir: str | Path | None = None,
+    ) -> "BidirectionalTrainer":
+        config_path = Path(config_path)
+        config = _load_yaml(config_path)
+        resolved_output_dir = Path(output_dir) if output_dir is not None else Path("outputs") / "online_bidreamer_from_scratch" / f"seed_{seed}"
+        return cls(
+            config=config,
+            exam_dir=config_path.parent,
+            exam_name=config_path.parent.name,
+            seed=seed,
+            output_dir=resolved_output_dir,
+            dry_run_steps=dry_run_steps,
+            stage=stage,
+        )
 
-        agent.reset_policy_state("forward")
-        agent.reset_policy_state("reverse")
-        reverse_latent_memory = None
-        latest_memory_summary = {}
-        if latent_prior_enabled:
-            reverse_latent_memory, latest_memory_summary = _build_reverse_latent_memory(
-                agent=agent,
-                reverse_replay=reverse_replay,
-                config=config,
-                device=device,
-                output_dir=output_dir,
+    def _stage_from_config(self) -> str:
+        train_cfg = self.config.get("train", {})
+        if not isinstance(train_cfg, dict):
+            return "actor_value_with_prior"
+        bidirectional_cfg = train_cfg.get("bidirectional", {})
+        if not isinstance(bidirectional_cfg, dict):
+            return "actor_value_with_prior"
+        return str(bidirectional_cfg.get("stage", "actor_value_with_prior"))
+
+    def _write_run_manifest(self, output_dir: Path) -> Path:
+        train_cfg = self.config.get("train", {})
+        bidirectional_cfg = train_cfg.get("bidirectional", {}) if isinstance(train_cfg, dict) else {}
+        manifest = {
+            "trainer": self.trainer_name,
+            "seed": self.seed,
+            "stage": self.stage,
+            "train": dict(train_cfg) if isinstance(train_cfg, dict) else {},
+            "env": dict(self.config.get("env", {})),
+            "forward_env": _direction_env_config(self.config, "forward"),
+            "reverse_env": _direction_env_config(self.config, "reverse"),
+            "bidirectional": dict(bidirectional_cfg) if isinstance(bidirectional_cfg, dict) else {},
+            "training": dict(self.config.get("training", {})),
+            "replay": dict(self.config.get("replay", {})),
+            "model": dict(self.config.get("model", {})),
+            "loss": dict(self.config.get("loss", {})),
+            "latent_prior": dict(self.config.get("latent_prior", {})),
+            "latent_memory": dict(self.config.get("latent_memory", {})),
+            "artifacts": {
+                "metrics_json": str(output_dir / "train_metrics.json"),
+                "loss_curves": str(output_dir / "loss_curves.png"),
+                "checkpoint_path": str(output_dir / "shared_world_model.pt"),
+                "env_sanity_dir": str(output_dir / "env_sanity"),
+                "eval_dir": str(output_dir / "eval"),
+                "latent_neighbor_vis_dir": str(output_dir / "latent_neighbor_vis"),
+            },
+        }
+        return self.write_json(output_dir / "run_manifest.json", manifest)
+
+    def _save_metrics(self, output_dir: Path, metrics_history: list[dict], agent: BidirectionalAgent):
+        (output_dir / "train_metrics.json").write_text(json.dumps(metrics_history, indent=2) + "\n", encoding="utf-8")
+        _plot_loss_curves(metrics_history, output_dir / "loss_curves.png")
+        agent.save(output_dir / "shared_world_model.pt")
+
+    def run(self) -> dict:
+        config = self.config
+        latent_prior_cfg = config.get("latent_prior", {})
+        latent_prior_enabled = bool(latent_prior_cfg.get("enabled", False))
+        if self.stage == "actor_value_no_prior" and latent_prior_enabled:
+            raise ValueError("Step 4 requires latent_prior.enabled=false")
+        if self.stage == "world_model_only" and latent_prior_enabled:
+            raise ValueError("world_model_only stage does not support latent_prior.enabled=true")
+        if self.stage == "actor_value_with_prior" and not latent_prior_enabled:
+            raise ValueError("Step 5 requires latent_prior.enabled=true")
+
+        _set_seed(self.seed)
+        device = _device_from_config(str(config["training"]["device"]))
+        output_dir = self.ensure_output_dir()
+        manifest_path = self._write_run_manifest(output_dir)
+        print(f"Saved run manifest: {manifest_path}")
+
+        sanity_config = dict(config)
+        sanity_config["output_dir"] = str(output_dir / "env_sanity")
+        sanity = run_env_sanity(config=sanity_config, seed=self.seed)
+
+        forward_env = make_bidirectional_env(config, "forward")
+        reverse_env = make_bidirectional_env(config, "reverse")
+        processor = DreamerV3Processor(device=device)
+        try:
+            forward_obs = forward_env.reset()
+            reverse_obs = reverse_env.reset()
+            obs_spec = processor.infer_observation_spec(forward_obs)
+            model = DirectionConditionedWorldModel(_infer_model_config(config, forward_obs)).to(device)
+            agent = BidirectionalAgent(
+                model=model,
+                learning_rate=float(config["training"]["learning_rate"]),
+                grad_clip=float(config["training"]["grad_clip"]),
+                actor_lr=float(config["training"].get("actor_lr", 8e-5)),
+                value_lr=float(config["training"].get("value_lr", 8e-5)),
+                actor_grad_clip=float(config["training"].get("actor_grad_clip", 100.0)),
+                value_grad_clip=float(config["training"].get("value_grad_clip", 100.0)),
+                imagination_horizon=int(config["training"].get("imagination_horizon", 15)),
+                gamma=float(config["training"].get("gamma", 0.99)),
+                lambda_=float(config["training"].get("lambda", 0.95)),
+                entropy_coef=float(config["training"].get("entropy_coef", 1e-3)),
+                actor_hidden_dim=int(config["model"].get("actor_hidden_dim", config["model"]["hidden_dim"])),
+                actor_num_layers=int(config["model"].get("actor_num_layers", 2)),
+                value_hidden_dim=int(config["model"].get("value_hidden_dim", config["model"]["hidden_dim"])),
+                value_num_layers=int(config["model"].get("value_num_layers", 2)),
+                min_std=float(config["training"].get("min_std", 0.1)),
+                max_std=float(config["training"].get("max_std", 1.0)),
+                init_std=float(config["training"].get("init_std", 1.0)),
+                imag_last=int(config["training"].get("imag_last", 0)),
+                use_twohot_value=bool(config["training"].get("use_twohot_value", True)),
+                use_slow_value=bool(config["training"].get("use_slow_value", True)),
+                slow_value_rate=float(config["training"].get("slow_value_rate", 0.02)),
+                repval_loss=bool(config["training"].get("repval_loss", False)),
+                repval_scale=float(config["training"].get("repval_scale", 0.3)),
+                use_return_norm=bool(config["training"].get("use_return_norm", True)),
+                use_advantage_norm=bool(config["training"].get("use_advantage_norm", True)),
+                norm_rate=float(config["training"].get("norm_rate", 0.01)),
+                norm_eps=float(config["training"].get("norm_eps", 1e-8)),
+                latent_prior_enabled=latent_prior_enabled,
+                latent_prior_beta=float(latent_prior_cfg.get("beta", 1.0)),
+                latent_prior_horizon=int(latent_prior_cfg.get("horizon", config["training"].get("imagination_horizon", 15))),
+                latent_prior_subgoal_step=int(latent_prior_cfg.get("subgoal_step", config.get("latent_memory", {}).get("subgoal_step", 1))),
             )
-            _visualize_reverse_latent_neighbors(
-                agent=agent,
-                forward_replay=forward_replay,
-                reverse_latent_memory=reverse_latent_memory,
-                output_dir=output_dir / "latent_neighbor_vis" / "step_000000",
-                limit=latent_prior_vis_limit,
-                subgoal_step=int(latent_prior_cfg.get("subgoal_step", 1)),
-                device=device,
-            )
+            forward_replay = EpisodeReplayBuffer(direction="forward", capacity=int(config["replay"]["capacity"]))
+            reverse_replay = EpisodeReplayBuffer(direction="reverse", capacity=int(config["replay"]["capacity"]))
+            rng = np.random.default_rng(self.seed)
+            total_env_steps = int(self.dry_run_steps or config["training"]["total_env_steps"])
+            warmup_per_direction = int(config["training"]["warmup_env_steps_per_direction"])
+            batch_size = int(config["training"]["batch_size"])
+            seq_len = int(config["training"]["seq_len"])
+            eval_interval = int(config["training"]["eval_interval"])
+            latent_prior_start = int(latent_prior_cfg.get("start_after_env_steps", 10000))
+            memory_update_interval = int(latent_prior_cfg.get("memory_update_interval", eval_interval))
+            latent_prior_vis_limit = int(latent_prior_cfg.get("num_visualize_neighbors", 8))
 
-        metrics_history = []
-        train_step = 0
-        for env_step in range(1, total_env_steps + 1):
-            if env_step % 2 == 1:
-                if stage == "world_model_only":
-                    forward_obs = _collect_one_step_random(forward_env, forward_replay, forward_obs, processor, obs_spec, rng)
-                else:
-                    forward_obs = _collect_one_step_policy(forward_env, forward_replay, forward_obs, processor, obs_spec, agent, "forward")
-            else:
-                if stage == "world_model_only":
-                    reverse_obs = _collect_one_step_random(reverse_env, reverse_replay, reverse_obs, processor, obs_spec, rng)
-                else:
-                    reverse_obs = _collect_one_step_policy(reverse_env, reverse_replay, reverse_obs, processor, obs_spec, agent, "reverse")
+            for _ in range(warmup_per_direction):
+                forward_obs = _collect_one_step_random(forward_env, forward_replay, forward_obs, processor, obs_spec, rng)
+            for _ in range(warmup_per_direction):
+                reverse_obs = _collect_one_step_random(reverse_env, reverse_replay, reverse_obs, processor, obs_spec, rng)
 
-            if latent_prior_enabled and memory_update_interval > 0 and env_step % memory_update_interval == 0:
+            agent.reset_policy_state("forward")
+            agent.reset_policy_state("reverse")
+            reverse_latent_memory = None
+            latest_memory_summary = {}
+            if latent_prior_enabled:
                 reverse_latent_memory, latest_memory_summary = _build_reverse_latent_memory(
                     agent=agent,
                     reverse_replay=reverse_replay,
@@ -435,61 +490,106 @@ def train_online_bidreamer_from_scratch(
                     agent=agent,
                     forward_replay=forward_replay,
                     reverse_latent_memory=reverse_latent_memory,
-                    output_dir=output_dir / "latent_neighbor_vis" / f"step_{env_step:06d}",
+                    output_dir=output_dir / "latent_neighbor_vis" / "step_000000",
                     limit=latent_prior_vis_limit,
                     subgoal_step=int(latent_prior_cfg.get("subgoal_step", 1)),
                     device=device,
                 )
 
-            if len(forward_replay._eligible_episodes(seq_len)) == 0 or len(reverse_replay._eligible_episodes(seq_len)) == 0:
-                continue
+            metrics_history = []
+            train_step = 0
+            for env_step in range(1, total_env_steps + 1):
+                if env_step % 2 == 1:
+                    if self.stage == "world_model_only":
+                        forward_obs = _collect_one_step_random(forward_env, forward_replay, forward_obs, processor, obs_spec, rng)
+                    else:
+                        forward_obs = _collect_one_step_policy(forward_env, forward_replay, forward_obs, processor, obs_spec, agent, "forward")
+                else:
+                    if self.stage == "world_model_only":
+                        reverse_obs = _collect_one_step_random(reverse_env, reverse_replay, reverse_obs, processor, obs_spec, rng)
+                    else:
+                        reverse_obs = _collect_one_step_policy(reverse_env, reverse_replay, reverse_obs, processor, obs_spec, agent, "reverse")
 
-            forward_batch = forward_replay.sample_batch(batch_size=batch_size, seq_len=seq_len, device=device)
-            reverse_batch = reverse_replay.sample_batch(batch_size=batch_size, seq_len=seq_len, device=device)
-            _attach_online_loss(forward_batch, config, "forward")
-            _attach_online_loss(reverse_batch, config, "reverse")
-            metrics = agent.train_world_model(forward_batch, reverse_batch)
-            if stage != "world_model_only":
-                metrics.update(agent.train_reverse_actor_value(reverse_batch))
-                forward_prior_memory = None
-                if latent_prior_enabled and env_step >= latent_prior_start:
-                    forward_prior_memory = reverse_latent_memory
-                metrics.update(agent.train_forward_actor_value(forward_batch, reverse_latent_memory=forward_prior_memory))
-            train_step += 1
-            row = {
-                "env_step": env_step,
-                "train_step": train_step,
-                "forward_replay_size": len(forward_replay),
-                "reverse_replay_size": len(reverse_replay),
+                if latent_prior_enabled and memory_update_interval > 0 and env_step % memory_update_interval == 0:
+                    reverse_latent_memory, latest_memory_summary = _build_reverse_latent_memory(
+                        agent=agent,
+                        reverse_replay=reverse_replay,
+                        config=config,
+                        device=device,
+                        output_dir=output_dir,
+                    )
+                    _visualize_reverse_latent_neighbors(
+                        agent=agent,
+                        forward_replay=forward_replay,
+                        reverse_latent_memory=reverse_latent_memory,
+                        output_dir=output_dir / "latent_neighbor_vis" / f"step_{env_step:06d}",
+                        limit=latent_prior_vis_limit,
+                        subgoal_step=int(latent_prior_cfg.get("subgoal_step", 1)),
+                        device=device,
+                    )
+
+                if len(forward_replay._eligible_episodes(seq_len)) == 0 or len(reverse_replay._eligible_episodes(seq_len)) == 0:
+                    continue
+
+                forward_batch = forward_replay.sample_batch(batch_size=batch_size, seq_len=seq_len, device=device)
+                reverse_batch = reverse_replay.sample_batch(batch_size=batch_size, seq_len=seq_len, device=device)
+                _attach_online_loss(forward_batch, config, "forward")
+                _attach_online_loss(reverse_batch, config, "reverse")
+                metrics = agent.train_world_model(forward_batch, reverse_batch)
+                if self.stage != "world_model_only":
+                    metrics.update(agent.train_reverse_actor_value(reverse_batch))
+                    forward_prior_memory = None
+                    if latent_prior_enabled and env_step >= latent_prior_start:
+                        forward_prior_memory = reverse_latent_memory
+                    metrics.update(agent.train_forward_actor_value(forward_batch, reverse_latent_memory=forward_prior_memory))
+                train_step += 1
+                row = {
+                    "env_step": env_step,
+                    "train_step": train_step,
+                    "forward_replay_size": len(forward_replay),
+                    "reverse_replay_size": len(reverse_replay),
+                }
+                if latest_memory_summary:
+                    row["reverse_memory_num_latents"] = int(latest_memory_summary["num_latents"])
+                    row["reverse_memory_num_episodes"] = int(latest_memory_summary["num_episodes"])
+                    row["reverse_memory_fallback_used"] = float(bool(latest_memory_summary.get("fallback_used", False)))
+                row.update(metrics)
+                metrics_history.append(row)
+
+                if env_step % eval_interval == 0 or env_step == total_env_steps:
+                    eval_metrics = _eval_world_model(agent, forward_replay, reverse_replay, config, device)
+                    if self.stage != "world_model_only":
+                        eval_dir = output_dir / "eval" / f"step_{env_step:06d}"
+                        eval_metrics.update(_evaluate_policy(agent, config, processor, obs_spec, "forward", eval_dir))
+                        eval_metrics.update(_evaluate_policy(agent, config, processor, obs_spec, "reverse", eval_dir))
+                    row.update({f"eval_{k}": v for k, v in eval_metrics.items()})
+                    self._save_metrics(output_dir, metrics_history, agent)
+
+            if not metrics_history:
+                raise RuntimeError("No world model updates were performed during online training")
+            self._save_metrics(output_dir, metrics_history, agent)
+            return {
+                "trainer": self.trainer_name,
+                "output_dir": output_dir,
+                "manifest_path": manifest_path,
+                "sanity": sanity,
+                "metrics_history": metrics_history,
             }
-            if latest_memory_summary:
-                row["reverse_memory_num_latents"] = int(latest_memory_summary["num_latents"])
-                row["reverse_memory_num_episodes"] = int(latest_memory_summary["num_episodes"])
-                row["reverse_memory_fallback_used"] = float(bool(latest_memory_summary.get("fallback_used", False)))
-            row.update(metrics)
-            metrics_history.append(row)
+        finally:
+            forward_env.close()
+            reverse_env.close()
 
-            if env_step % eval_interval == 0 or env_step == total_env_steps:
-                eval_metrics = _eval_world_model(agent, forward_replay, reverse_replay, config, device)
-                if stage != "world_model_only":
-                    eval_dir = output_dir / "eval" / f"step_{env_step:06d}"
-                    eval_metrics.update(_evaluate_policy(agent, config, processor, obs_spec, "forward", eval_dir))
-                    eval_metrics.update(_evaluate_policy(agent, config, processor, obs_spec, "reverse", eval_dir))
-                row.update({f"eval_{k}": v for k, v in eval_metrics.items()})
-                (output_dir / "train_metrics.json").write_text(json.dumps(metrics_history, indent=2) + "\n", encoding="utf-8")
-                _plot_loss_curves(metrics_history, output_dir / "loss_curves.png")
-                agent.save(output_dir / "shared_world_model.pt")
 
-        if not metrics_history:
-            raise RuntimeError("No world model updates were performed during online training")
-        (output_dir / "train_metrics.json").write_text(json.dumps(metrics_history, indent=2) + "\n", encoding="utf-8")
-        _plot_loss_curves(metrics_history, output_dir / "loss_curves.png")
-        agent.save(output_dir / "shared_world_model.pt")
-        return {
-            "output_dir": output_dir,
-            "sanity": sanity,
-            "metrics_history": metrics_history,
-        }
-    finally:
-        forward_env.close()
-        reverse_env.close()
+def train_online_bidreamer_from_scratch(
+    config_path: str | Path,
+    seed: int = 0,
+    dry_run_steps: int | None = None,
+    stage: str = "actor_value_with_prior",
+) -> dict:
+    trainer = BidirectionalTrainer.from_config_path(
+        config_path=config_path,
+        seed=seed,
+        dry_run_steps=dry_run_steps,
+        stage=stage,
+    )
+    return trainer.run()

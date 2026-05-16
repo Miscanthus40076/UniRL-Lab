@@ -5,6 +5,18 @@ from copy import deepcopy
 from sim_env.envs.make_env import make_env
 
 
+def _deep_merge(base, override):
+    if not isinstance(base, dict) or not isinstance(override, dict):
+        return deepcopy(override)
+    merged = deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
 def _default_env_config() -> dict:
     return {
         "type": "dmcontrol",
@@ -68,20 +80,31 @@ class BidirectionalEnvWrapper:
         return self.env.close()
 
 
+def _bidirectional_cfg(config: dict) -> dict:
+    train_cfg = config.get("train", {})
+    if not isinstance(train_cfg, dict):
+        return {}
+    bidirectional = train_cfg.get("bidirectional", {})
+    if bidirectional is None:
+        return {}
+    if not isinstance(bidirectional, dict):
+        raise TypeError("train.bidirectional must be a mapping")
+    return bidirectional
+
+
 def _direction_env_config(config: dict, direction: str) -> dict:
     base = deepcopy(config.get("env", _default_env_config()))
-    forward_override = deepcopy(config.get("forward_env", {}))
-    reverse_override = deepcopy(config.get("reverse_env", {}))
+    bidirectional = _bidirectional_cfg(config)
+    forward_override = _deep_merge(config.get("forward_env", {}), bidirectional.get("forward_env", {}))
+    reverse_override = _deep_merge(config.get("reverse_env", {}), bidirectional.get("reverse_env", {}))
     if direction == "forward":
-        env_cfg = base
-        env_cfg.update(forward_override)
+        env_cfg = _deep_merge(base, forward_override)
         env_cfg["domain_name"] = forward_override.get("domain_name", env_cfg.get("domain_name", "ball_in_cup"))
         env_cfg["task_name"] = forward_override.get("task_name", env_cfg.get("task_name", "catch"))
         env_cfg["name"] = forward_override.get("name", env_cfg.get("name", "ball_in_cup_catch"))
         return env_cfg
     if direction == "reverse":
-        env_cfg = base
-        env_cfg.update(reverse_override)
+        env_cfg = _deep_merge(base, reverse_override)
         env_cfg["domain_name"] = reverse_override.get("domain_name", env_cfg.get("domain_name", "ball_in_cup"))
         env_cfg["task_name"] = reverse_override.get("task_name", "release")
         env_cfg["name"] = reverse_override.get("name", "ball_in_cup_release")

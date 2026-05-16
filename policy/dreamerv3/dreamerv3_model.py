@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
+from .thick_context import ThickContextConfig
+
 
 @dataclass(slots=True)
 class DreamerObservationSpec:
@@ -67,10 +69,21 @@ class DreamerV3ModelConfig:
     norm_rate: float = 0.01
     norm_eps: float = 1e-8
     aux: DreamerAuxConfig = field(default_factory=DreamerAuxConfig)
+    thick_context: ThickContextConfig = field(default_factory=ThickContextConfig)
 
     @property
     def encoder_type(self) -> str:
         return "cnn" if self.observation.mode == "image" else "mlp"
+
+    @property
+    def base_feat_dim(self) -> int:
+        return int(self.deter_dim + self.stoch_dim * self.stoch_classes)
+
+    @property
+    def augmented_feat_dim(self) -> int:
+        if not self.thick_context.enabled:
+            return self.base_feat_dim
+        return int(self.base_feat_dim + self.thick_context.context_dim)
 
     def asdict(self) -> dict:
         data = asdict(self)

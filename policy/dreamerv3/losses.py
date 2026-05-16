@@ -25,6 +25,7 @@ class WorldModelLossConfig:
     twohot_bins: int = 255
     twohot_low: float = -20.0
     twohot_high: float = 20.0
+    context_update_penalty: float = 0.0
 
 
 def categorical_kl(post: dict[str, torch.Tensor], prior: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -94,6 +95,12 @@ def world_model_loss(outputs: dict, batch: dict, config: WorldModelLossConfig) -
         + config.dynamics_scale * dynamics_kl_per_seq
         + config.representation_scale * representation_kl_per_seq
     )
+    context_gate = outputs.get("context_gate")
+    context_update_loss = None
+    if context_gate is not None:
+        context_update_per_seq = _reduce_except_batch(context_gate.float())
+        context_update_loss = context_update_per_seq.mean()
+        total_per_seq = total_per_seq + config.context_update_penalty * context_update_per_seq
     total = total_per_seq.mean()
     metrics = {
         "model_loss": total.detach(),
@@ -105,6 +112,19 @@ def world_model_loss(outputs: dict, batch: dict, config: WorldModelLossConfig) -
         "representation_kl_loss": representation_kl.detach(),
         "priority": total_per_seq.detach(),
     }
+    if context_update_loss is not None:
+        gate = context_gate.detach().float()
+        metrics["context_update_loss"] = context_update_loss.detach()
+        metrics["context_gate_mean"] = gate.mean()
+        metrics["context_gate_std"] = gate.std(unbiased=False)
+        metrics["context_gate_min"] = gate.min()
+        metrics["context_gate_max"] = gate.max()
+        context_delta_norm = outputs.get("context_delta_norm")
+        if context_delta_norm is not None:
+            metrics["context_delta_norm_mean"] = context_delta_norm.detach().float().mean()
+        context = outputs.get("context")
+        if context is not None:
+            metrics["context_norm_mean"] = torch.linalg.vector_norm(context.detach().float(), dim=-1).mean()
 
     if outputs.get("grasp_logit") is not None and "is_grasping" in batch:
         grasp_loss = F.binary_cross_entropy_with_logits(outputs["grasp_logit"], batch["is_grasping"].float())

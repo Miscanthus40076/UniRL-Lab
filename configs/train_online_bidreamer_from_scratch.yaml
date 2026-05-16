@@ -41,7 +41,7 @@ sanity:
   gif_fps: 20
 
 replay:
-  capacity: 10000
+  capacity: 100000
 
 model:
   action_dim: 2
@@ -61,12 +61,12 @@ model:
 
 training:
   total_env_steps: 100000
-  warmup_env_steps_per_direction: 50
-  batch_size: 4
-  seq_len: 8
+  warmup_env_steps_per_direction: 1000
+  batch_size: 16
+  seq_len: 16
   learning_rate: 0.0003
-  actor_lr: 0.00008
-  value_lr: 0.00008
+  actor_lr: 0.00004
+  value_lr: 0.00004
   grad_clip: 100.0
   actor_grad_clip: 100.0
   value_grad_clip: 100.0
@@ -87,13 +87,13 @@ training:
   use_advantage_norm: true
   norm_rate: 0.01
   norm_eps: 0.00000001
-  eval_interval: 50
+  eval_interval: 1000
   device: cuda_if_available_else_cpu
 
 eval:
-  episodes_per_direction: 2
+  episodes_per_direction: 20
   max_episode_steps: 200
-  deterministic: false
+  deterministic: true
   save_gif: true
   gif_fps: 20
 
@@ -116,8 +116,8 @@ ablation:
 latent_prior:
   enabled: true
   start_after_env_steps: 10000
-  memory_update_interval: 200
-  beta: 1.0
+  memory_update_interval: 1000
+  beta: 0.05
   horizon: 3
   subgoal_step: 1
   num_visualize_neighbors: 8

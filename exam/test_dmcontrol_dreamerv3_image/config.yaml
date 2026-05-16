@@ -67,6 +67,14 @@ policy:
     use_twohot_value: true
     use_slow_value: true
     repval_loss: true
+    thick_context:
+      enabled: false
+      context_dim: 64
+      hidden_dim: 128
+      update_penalty: 0.0005
+      detach_base_feat: false
+      init_context_zero: true
+      gate_bias_init: -2.0
     aux:
       predict_grasp: false
       contact_num_classes: null

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+import torch
 from torch import nn
+
+from .thick_context import SlowContextModule, ThickContextConfig
 
 from .decoder import CNNDecoder, MLPDecoder
 from .encoder import CNNEncoder, MLPEncoder
@@ -32,6 +35,17 @@ class DreamerV3WorldModelConfig:
     reward_low: float = -20.0
     reward_high: float = 20.0
     rssm_unimix: float = 0.01
+    thick_context: ThickContextConfig = field(default_factory=ThickContextConfig)
+
+    @property
+    def base_feat_dim(self) -> int:
+        return int(self.deter_dim + self.stoch_dim * self.stoch_classes)
+
+    @property
+    def augmented_feat_dim(self) -> int:
+        if not self.thick_context.enabled:
+            return self.base_feat_dim
+        return int(self.base_feat_dim + self.thick_context.context_dim)
 
 
 class DreamerV3WorldModel(nn.Module):
@@ -64,12 +78,16 @@ class DreamerV3WorldModel(nn.Module):
                 unimix=config.rssm_unimix,
             )
         )
-        feat_dim = config.deter_dim + config.stoch_dim * config.stoch_classes
+        self.base_feat_dim = config.base_feat_dim
+        self.augmented_feat_dim = config.augmented_feat_dim
+        self.slow_context = (
+            SlowContextModule(self.base_feat_dim, config.thick_context) if config.thick_context.enabled else None
+        )
         if config.encoder_type == "cnn" or config.obs_shape is not None:
-            self.decoder = CNNDecoder(feat_dim, tuple(config.obs_shape), config.hidden_dim)
+            self.decoder = CNNDecoder(self.augmented_feat_dim, tuple(config.obs_shape), config.hidden_dim)
         else:
             self.decoder = MLPDecoder(
-                feat_dim,
+                self.augmented_feat_dim,
                 int(config.obs_dim),
                 config.hidden_dim,
                 config.num_layers,
@@ -77,7 +95,7 @@ class DreamerV3WorldModel(nn.Module):
             )
         self.reward_head = (
             TwoHotSymlogHead(
-                feat_dim,
+                self.augmented_feat_dim,
                 config.hidden_dim,
                 config.num_layers,
                 num_bins=config.reward_bins,
@@ -85,12 +103,14 @@ class DreamerV3WorldModel(nn.Module):
                 high=config.reward_high,
             )
             if config.use_twohot_reward
-            else RewardHead(feat_dim, config.hidden_dim, config.num_layers)
+            else RewardHead(self.augmented_feat_dim, config.hidden_dim, config.num_layers)
         )
-        self.continue_head = ContinueHead(feat_dim, config.hidden_dim, config.num_layers)
-        self.grasp_head = GraspHead(feat_dim, config.hidden_dim, config.num_layers) if config.predict_grasp else None
+        self.continue_head = ContinueHead(self.augmented_feat_dim, config.hidden_dim, config.num_layers)
+        self.grasp_head = (
+            GraspHead(self.augmented_feat_dim, config.hidden_dim, config.num_layers) if config.predict_grasp else None
+        )
         self.contact_head = (
-            ClassHead(feat_dim, config.contact_num_classes, config.hidden_dim, config.num_layers)
+            ClassHead(self.augmented_feat_dim, config.contact_num_classes, config.hidden_dim, config.num_layers)
             if config.contact_num_classes is not None
             else None
         )
@@ -100,18 +120,73 @@ class DreamerV3WorldModel(nn.Module):
         out = module(x.reshape(batch_size * seq_len, *x.shape[2:]))
         return out.reshape(batch_size, seq_len, *out.shape[1:])
 
+    def initial_context(self, batch_size: int, device=None, dtype=None):
+        if self.slow_context is None:
+            return None
+        return self.slow_context.initial_context(batch_size, device=device, dtype=dtype)
+
+    def get_base_feat(self, state: dict[str, torch.Tensor]) -> torch.Tensor:
+        return self.rssm.get_feat(state)
+
+    def concat_context(self, base_feat, context=None):
+        if self.slow_context is None:
+            return base_feat
+        if context is None:
+            context = self.initial_context(base_feat.shape[0], device=base_feat.device, dtype=base_feat.dtype)
+        if base_feat.ndim == 3 and context.ndim == 2:
+            context = context.unsqueeze(1).expand(-1, base_feat.shape[1], -1)
+        return torch.cat([base_feat, context], dim=-1)
+
+    def build_features(self, base_feat, prev_context=None, is_first=None) -> dict:
+        if self.slow_context is None:
+            return {
+                "base_feat": base_feat,
+                "context": None,
+                "context_gate": None,
+                "context_candidate": None,
+                "context_prev": None,
+                "context_delta_norm": None,
+                "augmented_feat": base_feat,
+            }
+        outputs = self.slow_context.forward_details(base_feat, prev_context=prev_context, is_first=is_first)
+        return {
+            "base_feat": base_feat,
+            "context": outputs["context"],
+            "context_gate": outputs["gate"],
+            "context_candidate": outputs["candidate_context"],
+            "context_prev": outputs["prev_context"],
+            "context_delta_norm": outputs["delta_norm"],
+            "augmented_feat": outputs["augmented_feat"],
+        }
+
+    def get_augmented_feat(self, state: dict, prev_context=None, is_first=None, return_details: bool = False):
+        base_feat = self.get_base_feat(state)
+        details = self.build_features(base_feat, prev_context=prev_context, is_first=is_first)
+        if return_details:
+            return details
+        return details["augmented_feat"]
+
     def forward(self, batch: dict, loss_config: WorldModelLossConfig | None = None) -> dict:
         obs = batch["obs"]
         action = batch["action"]
         is_first = batch.get("is_first")
         embed = self._seq_apply(self.encoder, obs)
         post, prior = self.rssm.observe(embed, action, is_first)
-        feat = self.rssm.get_feat(post)
+        base_feat = self.rssm.get_feat(post)
+        feature_outputs = self.build_features(base_feat, prev_context=None, is_first=is_first)
+        feat = feature_outputs["augmented_feat"]
         outputs = {
             "embed": embed,
             "post": post,
             "prior": prior,
+            "base_feat": base_feat,
             "feat": feat,
+            "augmented_feat": feat,
+            "context": feature_outputs["context"],
+            "context_gate": feature_outputs["context_gate"],
+            "context_candidate": feature_outputs["context_candidate"],
+            "context_prev": feature_outputs["context_prev"],
+            "context_delta_norm": feature_outputs["context_delta_norm"],
             "obs_pred": self._seq_apply(self.decoder, feat),
             "continue_logit": self._seq_apply(self.continue_head, feat),
             "grasp_logit": self._seq_apply(self.grasp_head, feat) if self.grasp_head is not None else None,

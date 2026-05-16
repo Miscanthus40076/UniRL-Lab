@@ -7,16 +7,16 @@ train:
   eval_interval: 5000
   eval_episodes: 1000
   eval_visualize_episodes: 10
-  eval_success_metric: info_success
+  eval_success_metric: episode_return_positive
   eval_success_threshold: 0.0
   record_interval: 200
   device: cuda
   multi_task: false
 env:
   type: dmcontrol
-  name: ball_in_cup_release
+  name: ball_in_cup_catch
   domain_name: ball_in_cup
-  task_name: release
+  task_name: catch
   observation:
     type: image
     num_cams: 1
@@ -40,7 +40,7 @@ env:
     create_cam: null
 policy:
   type: dreamerv3
-  name: dreamerv3_ball_in_cup_release_30k
+  name: dreamerv3_ball_in_cup_30k_thick_lite
   checkpoint:
     load: false
     path: policy.ckpt
@@ -99,7 +99,7 @@ policy:
     norm_eps: 1.0e-8
     priority_replay: false
     thick_context:
-      enabled: false
+      enabled: true
       context_dim: 64
       hidden_dim: 128
       update_penalty: 0.0005

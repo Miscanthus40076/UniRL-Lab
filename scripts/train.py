@@ -1,10 +1,13 @@
+from __future__ import annotations
+
 from pathlib import Path
 import argparse
-from copy import deepcopy
-import json
+import importlib.util
 import os
+import re
 import sys
-import time
+
+import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_ROOT = Path(__file__).resolve().parent
@@ -15,244 +18,141 @@ if str(SCRIPT_ROOT) not in sys.path:
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
-from policy.make_policy import make_policy
-from sim_env.envs.make_env import make_env
-from utils import CsvLog, JsonlLog, load_config, metrics_row_from_payload, multi_task_enabled, normalize_policy_metrics, output_dir_for_task, plot_policy_metrics_jsonl, resolve_env_tasks, run_policy_evaluation, train_cfg, validate_exam_config
+if __name__ == "__main__":
+    sys.modules.setdefault("scripts.train", sys.modules[__name__])
+
+from src.trainers import build_trainer as build_root_trainer
+from utils import validate_exam_config
 
 
 EXAM_ROOT = PROJECT_ROOT / "exam"
+TRAIN_FILENAME = "train.py"
+CONFIG_FILENAME = "config.yaml"
 
 
-def maybe_update(policy, batch):
-    update = getattr(policy, "update", None)
-    if not callable(update):
-        return normalize_policy_metrics(None)
-    return normalize_policy_metrics(update(batch))
+class BaseExamTrainApp:
+    def __init__(self, exam_dir: str | Path):
+        self.exam_dir = Path(exam_dir).resolve()
+        self.exam_name = self.exam_dir.name
+
+    @classmethod
+    def from_source_file(cls, source_file: str | Path) -> "BaseExamTrainApp":
+        return cls(Path(source_file).resolve().parent)
+
+    @property
+    def config_path(self) -> Path:
+        return self.exam_dir / CONFIG_FILENAME
+
+    def load_config(self) -> dict:
+        if not self.config_path.exists():
+            raise FileNotFoundError(f"Exam config not found: {self.config_path}")
+        with self.config_path.open("r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle)
+        if not isinstance(config, dict):
+            raise TypeError(f"Exam config must be a mapping: {self.config_path}")
+        return config
+
+    def build_default_trainer(self, config: dict):
+        return build_root_trainer(config=config, exam_dir=self.exam_dir, exam_name=self.exam_name)
+
+    def build_trainer(self, config: dict):
+        raise NotImplementedError("Exam train.py must implement build_trainer(config)")
+
+    def run(self):
+        config = self.load_config()
+        validate_exam_config(config)
+        trainer = self.build_trainer(config)
+        return trainer.run()
 
 
-def _policy_config_for_task(config):
-    policy_config = deepcopy(config["policy"])
-    checkpoint_cfg = dict(policy_config.get("checkpoint", {}))
-    if multi_task_enabled(config):
-        checkpoint_cfg["load"] = False
-        checkpoint_cfg["path"] = None
-    policy_config["checkpoint"] = checkpoint_cfg
-    return policy_config
+def render_exam_train_template() -> str:
+    return """from pathlib import Path
+import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.train import BaseExamTrainApp
 
 
-def _checkpoint_path_for_task(config, policy_config, output_dir):
-    checkpoint_cfg = policy_config.get("checkpoint", {})
-    checkpoint_path = checkpoint_cfg.get("path")
-    if checkpoint_path:
-        checkpoint_path = Path(checkpoint_path)
-        if multi_task_enabled(config) and not checkpoint_path.is_absolute():
-            return output_dir / checkpoint_path
-        return checkpoint_path
-    return output_dir / "policy.ckpt"
+class ExamTrain(BaseExamTrainApp):
+    def build_trainer(self, config: dict):
+        return self.build_default_trainer(config)
 
 
-def _save_checkpoint(policy, policy_config, config, output_dir):
-    checkpoint_cfg = policy_config.get("checkpoint", {})
-    save = getattr(policy, "save", None)
-    if not callable(save) or not bool(checkpoint_cfg.get("save", False)):
-        return None
-
-    checkpoint_path = _checkpoint_path_for_task(config, policy_config, output_dir)
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    save(checkpoint_path)
-    return checkpoint_path
+def main():
+    return ExamTrain.from_source_file(__file__).run()
 
 
-def _write_run_manifest(config, policy_config, output_dir, task):
-    manifest = {
-        "task_name": task["name"],
-        "train": dict(config.get("train", {})),
-        "env": dict(task.get("env", {})),
-        "policy": dict(policy_config),
-        "artifacts": {
-            "metrics_csv": str(output_dir / "metrics.csv"),
-            "policy_metrics_jsonl": str(output_dir / "policy_metrics.jsonl"),
-            "plots_dir": str(output_dir / "plots"),
-            "eval_dir": str(output_dir / "eval"),
-            "checkpoint_path": str(_checkpoint_path_for_task(config, policy_config, output_dir)),
-        },
-    }
-    manifest_path = output_dir / "run_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return manifest_path
+if __name__ == "__main__":
+    main()
+"""
 
 
-def _train_env_config(task_env):
-    env_config = deepcopy(task_env)
-    render_config = dict(env_config.get("render", {}))
-    render_config["enabled"] = False
-    render_config["save_frames"] = False
-    render_config["save_video"] = False
-    env_config["render"] = render_config
-    return env_config
+def _exam_train_path(exam_name: str) -> Path:
+    return EXAM_ROOT / exam_name / TRAIN_FILENAME
 
 
-def _eval_env_config(task_env):
-    env_config = deepcopy(task_env)
-    render_config = dict(env_config.get("render", {}))
-    render_config["enabled"] = True
-    render_config["save_frames"] = False
-    render_config["save_video"] = False
-    env_config["render"] = render_config
-    return env_config
+def _module_name_for_exam(exam_name: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_]+", "_", str(exam_name)).strip("_")
+    return f"exam_train_{slug or 'exam'}"
 
 
-def train_task(config, exam_dir, task):
-    validate_exam_config(config)
-    cfg = train_cfg(config)
+def _load_exam_train_module(exam_name: str):
+    train_path = _exam_train_path(exam_name)
+    if not train_path.exists():
+        raise FileNotFoundError(
+            f"Exam train entry not found: {train_path}. "
+            "Each exam must provide its own train.py that inherits from scripts/train.py."
+        )
 
-    total_steps = int(cfg.get("total_steps", 1000))
-    max_episode_steps = cfg.get("max_episode_steps")
-    log_interval = int(cfg.get("log_interval", 100))
-    record_interval = int(cfg.get("record_interval", log_interval))
-    save_interval = int(cfg.get("save_interval", 0))
-    eval_interval = int(cfg.get("eval_interval", 0))
-    eval_episodes = int(cfg.get("eval_episodes", 0))
-    eval_visualize_episodes = int(cfg.get("eval_visualize_episodes", min(eval_episodes, 10)))
-    eval_success_metric = str(cfg.get("eval_success_metric", "episode_return_positive"))
-    eval_success_threshold = float(cfg.get("eval_success_threshold", 0.0))
+    module_name = _module_name_for_exam(exam_name)
+    spec = importlib.util.spec_from_file_location(module_name, train_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to create module spec for exam train entry: {train_path}")
 
-    output_dir = output_dir_for_task(exam_dir, config, task["name"])
-    metrics_path = output_dir / "metrics.csv"
-    policy_metrics_path = output_dir / "policy_metrics.jsonl"
-    plots_dir = output_dir / "plots"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    env = make_env(_train_env_config(task["env"]))
-    eval_env = None
-    policy_config = _policy_config_for_task(config)
-    policy = make_policy(policy_config, env, exam_dir=exam_dir)
-    log = CsvLog(metrics_path)
-    policy_metrics_log = JsonlLog(policy_metrics_path)
-    manifest_path = _write_run_manifest(config, policy_config, output_dir, task)
-
-    print(f"Training task: {task['name']}")
-    print(f"Saved run manifest: {manifest_path}")
-    obs = env.reset()
-    episode_return = 0.0
-    episode_length = 0
-    episode_index = 0
-    start_time = time.time()
-
-    try:
-        for step in range(1, total_steps + 1):
-            action = policy.act(obs)
-            next_obs, reward, done, info = env.step(action)
-            forced_done = max_episode_steps is not None and episode_length + 1 >= int(max_episode_steps)
-            done = bool(done or forced_done)
-
-            episode_return += float(reward)
-            episode_length += 1
-
-            policy_metrics = maybe_update(
-                policy,
-                {
-                    "obs": obs,
-                    "action": action,
-                    "reward": reward,
-                    "next_obs": next_obs,
-                    "done": done,
-                    "truncated": bool(forced_done),
-                    "info": info,
-                    "step": step,
-                },
-            )
-            metrics = metrics_row_from_payload(policy_metrics)
-
-            if step % record_interval == 0 or done or step == total_steps:
-                elapsed = max(time.time() - start_time, 1e-6)
-                train_scalars = {
-                    "step": step,
-                    "episode_index": episode_index,
-                    "episode_return": episode_return,
-                    "episode_length": episode_length,
-                    "fps": step / elapsed,
-                }
-                row = dict(train_scalars)
-                row.update(metrics)
-                log.add(row)
-                policy_metrics_log.add(
-                    {
-                        "step": step,
-                        "episode_index": episode_index,
-                        "episode_return": episode_return,
-                        "episode_length": episode_length,
-                        "train_scalars": train_scalars,
-                        "policy_metrics": policy_metrics,
-                    }
-                )
-                plot_policy_metrics_jsonl(policy_metrics_path, plots_dir, x_key="step")
-
-            if step % log_interval == 0:
-                print(f"step={step} episode={episode_index} return={episode_return:.4f} length={episode_length}")
-
-            if eval_episodes > 0 and eval_interval > 0 and step % eval_interval == 0:
-                if eval_env is None:
-                    eval_env = make_env(_eval_env_config(task["env"]))
-                eval_dir = output_dir / "eval" / f"step_{step:07d}"
-                print(f"Running evaluation at step={step} ...")
-                eval_result = run_policy_evaluation(
-                    env=eval_env,
-                    policy=policy,
-                    output_dir=eval_dir,
-                    eval_episodes=eval_episodes,
-                    max_episode_steps=max_episode_steps,
-                    gif_fps=20,
-                    visualize_episodes=eval_visualize_episodes,
-                    success_metric=eval_success_metric,
-                    success_threshold=eval_success_threshold,
-                )
-                print(f"Saved eval summary: {eval_result['summary_path']}")
-                reset = getattr(policy, "reset", None)
-                if callable(reset):
-                    reset()
-
-            if save_interval > 0 and step % save_interval == 0:
-                checkpoint_path = _save_checkpoint(policy, policy_config, config, output_dir)
-                if checkpoint_path is not None:
-                    print(f"Saved checkpoint: {checkpoint_path}")
-
-            obs = next_obs
-
-            if done:
-                reset = getattr(policy, "reset", None)
-                if callable(reset):
-                    reset()
-                episode_index += 1
-                obs = env.reset()
-                episode_return = 0.0
-                episode_length = 0
-    finally:
-        checkpoint_path = _save_checkpoint(policy, policy_config, config, output_dir)
-        if checkpoint_path is not None:
-            print(f"Saved final checkpoint: {checkpoint_path}")
-        env.close()
-        if eval_env is not None:
-            eval_env.close()
-
-    plot_paths = plot_policy_metrics_jsonl(policy_metrics_path, plots_dir, x_key="step")
-    print(f"Saved metrics CSV: {metrics_path}")
-    print(f"Saved policy metrics JSONL: {policy_metrics_path}")
-    if plot_paths:
-        print("Saved metric plots:")
-        for path in plot_paths:
-            print(f"  {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
-def train(exam_name):
-    config, exam_dir = load_config(EXAM_ROOT, exam_name)
-    tasks = resolve_env_tasks(config)
-    for task in tasks:
-        train_task(config, exam_dir, task)
+def _resolve_exam_train_class(module):
+    explicit = getattr(module, "EXAM_TRAIN_CLASS", None)
+    if explicit is not None:
+        if not isinstance(explicit, type) or not issubclass(explicit, BaseExamTrainApp):
+            raise TypeError("EXAM_TRAIN_CLASS must be a BaseExamTrainApp subclass")
+        return explicit
+
+    named = getattr(module, "ExamTrain", None)
+    if isinstance(named, type) and issubclass(named, BaseExamTrainApp) and named is not BaseExamTrainApp:
+        return named
+
+    candidates = []
+    for value in vars(module).values():
+        if isinstance(value, type) and issubclass(value, BaseExamTrainApp) and value is not BaseExamTrainApp:
+            candidates.append(value)
+
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise ImportError("Exam train.py must define an ExamTrain subclass of BaseExamTrainApp")
+    raise ImportError("Exam train.py defines multiple BaseExamTrainApp subclasses; set EXAM_TRAIN_CLASS explicitly")
+
+
+def load_exam_train_app(exam_name: str) -> BaseExamTrainApp:
+    module = _load_exam_train_module(exam_name)
+    train_cls = _resolve_exam_train_class(module)
+    return train_cls(EXAM_ROOT / exam_name)
+
+
+def train(exam_name: str):
+    return load_exam_train_app(exam_name).run()
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train an exam from exam/<name>/config.yaml")
+    parser = argparse.ArgumentParser(description="Train an exam from exam/<name>/train.py")
     parser.add_argument("exam_name", help="Name of the exam directory under exam/")
     return parser.parse_args()
 

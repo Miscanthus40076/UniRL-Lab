@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import torch
+
+from .thick_context import ThickContextConfig
 
 from .dreamerv3_model import DreamerAuxConfig, DreamerObservationSpec, DreamerV3ModelConfig
 
@@ -78,6 +80,7 @@ class DreamerV3PolicyConfig:
 
     aux_predict_grasp: bool = False
     aux_contact_num_classes: int | None = None
+    thick_context: ThickContextConfig = field(default_factory=ThickContextConfig)
 
     def validate(self):
         if self.device not in ("cpu", "cuda"):
@@ -98,6 +101,7 @@ class DreamerV3PolicyConfig:
             raise ValueError("stoch_dim and stoch_classes must be positive")
         if self.aux_contact_num_classes is not None and self.aux_contact_num_classes <= 1:
             raise ValueError("aux_contact_num_classes must be > 1 when provided")
+        self.thick_context.validate()
 
     def asdict(self) -> dict:
         return asdict(self)
@@ -107,10 +111,12 @@ def build_dreamerv3_policy_config(policy_config: dict | None) -> tuple[DreamerV3
     policy_config = dict(policy_config or {})
     raw = dict(policy_config.get("dreamerv3", {}))
     aux = dict(raw.pop("aux", {}))
+    thick_context = ThickContextConfig(**dict(raw.pop("thick_context", {})))
     if "predict_grasp" in aux:
         raw["aux_predict_grasp"] = aux["predict_grasp"]
     if "contact_num_classes" in aux:
         raw["aux_contact_num_classes"] = aux["contact_num_classes"]
+    raw["thick_context"] = thick_context
 
     cfg = DreamerV3PolicyConfig(**raw)
     cfg.validate()
@@ -188,4 +194,5 @@ def build_dreamerv3_model_config(
             predict_grasp=cfg.aux_predict_grasp,
             contact_num_classes=cfg.aux_contact_num_classes,
         ),
+        thick_context=cfg.thick_context,
     )

@@ -1,10 +1,19 @@
 from pathlib import Path
+import sys
+
 import yaml
 
-from utils import validate_exam_config
-
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_ROOT = Path(__file__).resolve().parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
+
+from scripts.train import render_exam_train_template
+from scripts.utils import validate_exam_config
+
+
 EXAM_ROOT = PROJECT_ROOT / "exam"
 POLICY_ROOT = PROJECT_ROOT / "policy"
 
@@ -212,14 +221,18 @@ def main():
     exam_dir.mkdir(parents=True)
 
     config_path = exam_dir / "config.yaml"
+    train_path = exam_dir / "train.py"
 
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, sort_keys=False)
+    train_path.write_text(render_exam_train_template(), encoding="utf-8")
 
     print(f"\nCreated exam:")
     print(f"  {exam_dir}")
     print(f"Config:")
     print(f"  {config_path}")
+    print(f"Train entry:")
+    print(f"  {train_path}")
 
 
 if __name__ == "__main__":

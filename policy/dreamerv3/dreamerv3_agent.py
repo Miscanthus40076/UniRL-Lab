@@ -35,6 +35,7 @@ class DreamerV3Agent:
             twohot_bins=config.twohot_bins,
             twohot_low=config.twohot_low,
             twohot_high=config.twohot_high,
+            context_update_penalty=(config.thick_context.update_penalty if config.thick_context.enabled else 0.0),
         )
         self.device = torch.device(config.device)
 
@@ -58,9 +59,10 @@ class DreamerV3Agent:
             reward_low=config.twohot_low,
             reward_high=config.twohot_high,
             rssm_unimix=config.rssm_unimix,
+            thick_context=config.thick_context,
         )
         self.world_model = DreamerV3WorldModel(wm_config).to(self.device)
-        feat_dim = config.deter_dim + config.stoch_dim * config.stoch_classes
+        feat_dim = config.augmented_feat_dim
         self.actor = DreamerActor(
             DreamerActorConfig(
                 feat_dim=feat_dim,
@@ -85,9 +87,11 @@ class DreamerV3Agent:
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=config.actor_lr)
         self.value_optimizer = torch.optim.Adam(self.value.parameters(), lr=config.value_lr)
         self.latent_state = self.world_model.rssm.init_state(1, self.device)
+        self.latent_context = self.world_model.initial_context(1, self.device)
         norm_cfg = RunningNormConfig(rate=config.norm_rate, eps=config.norm_eps)
         self.return_normalizer = RunningNormalizer(norm_cfg)
         self.advantage_normalizer = RunningNormalizer(norm_cfg)
+        self.last_context_metrics = self._default_context_metrics()
         self._online_batch_size = 16
         self._online_seq_len = 32
         self._online_warmup_steps = 1000
@@ -96,6 +100,30 @@ class DreamerV3Agent:
         self._online_max_updates_per_step = 0
         self._online_train_calls = 0
         self._online_train_budget = 0.0
+
+    def _default_context_metrics(self) -> dict[str, float]:
+        if not self.config.thick_context.enabled:
+            return {}
+        return {
+            "context_gate": 0.0,
+            "context_delta_norm": 0.0,
+            "context_norm": 0.0,
+        }
+
+    def _context_metrics_from_details(self, details: dict | None) -> dict[str, float]:
+        if not self.config.thick_context.enabled or not details or details.get("context") is None:
+            return {}
+        context = details["context"]
+        gate = details["context_gate"]
+        delta_norm = details["context_delta_norm"]
+        return {
+            "context_gate": float(gate.detach().mean().cpu()),
+            "context_delta_norm": float(delta_norm.detach().mean().cpu()),
+            "context_norm": float(torch.linalg.vector_norm(context.detach(), dim=-1).mean().cpu()),
+        }
+
+    def get_context_diagnostics(self) -> dict[str, float]:
+        return dict(self.last_context_metrics)
 
     def configure_online_update(
         self,
@@ -205,6 +233,8 @@ class DreamerV3Agent:
 
     def reset_latent(self, batch_size: int = 1):
         self.latent_state = self.world_model.rssm.init_state(batch_size, self.device)
+        self.latent_context = self.world_model.initial_context(batch_size, self.device)
+        self.last_context_metrics = self._default_context_metrics()
         return self.latent_state
 
     def update_latent(self, obs: np.ndarray, prev_action: np.ndarray, is_first: bool = False):
@@ -221,11 +251,20 @@ class DreamerV3Agent:
                 action=action_t,
                 is_first=first_t,
             )
+            feature_details = self.world_model.get_augmented_feat(
+                self.latent_state,
+                prev_context=self.latent_context,
+                is_first=first_t,
+                return_details=True,
+            )
+            self.latent_context = feature_details["context"].detach() if feature_details["context"] is not None else None
+            self.last_context_metrics = self._context_metrics_from_details(feature_details)
         return self.latent_state
 
     def act(self, deterministic: bool = False) -> np.ndarray:
         with torch.no_grad():
-            feat = self.world_model.rssm.get_feat(self.latent_state)
+            base_feat = self.world_model.get_base_feat(self.latent_state)
+            feat = self.world_model.concat_context(base_feat, self.latent_context)
             action = self.actor.mode(feat) if deterministic else self.actor.sample(feat)[0]
         return action.squeeze(0).cpu().numpy().astype(np.float32)
 
@@ -249,18 +288,25 @@ class DreamerV3Agent:
         for param in self.world_model.parameters():
             param.requires_grad_(trainable)
 
-    def _posterior_start_state(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    def _posterior_start_state(self, batch: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], torch.Tensor | None]:
         with torch.no_grad():
             outputs = self.world_model(batch, None)
             post = outputs["post"]
+            context = outputs.get("context")
         batch_size, seq_len, _ = post["h"].shape
         if self.config.imag_last and self.config.imag_last > 0:
             steps = min(int(self.config.imag_last), seq_len)
-            return {
+            state = {
                 key: value[:, -steps:].reshape(batch_size * steps, *value.shape[2:]).detach()
                 for key, value in post.items()
             }
-        return {key: value.reshape(batch_size * seq_len, *value.shape[2:]).detach() for key, value in post.items()}
+            context_state = (
+                context[:, -steps:].reshape(batch_size * steps, context.shape[-1]).detach() if context is not None else None
+            )
+            return state, context_state
+        state = {key: value.reshape(batch_size * seq_len, *value.shape[2:]).detach() for key, value in post.items()}
+        context_state = context.reshape(batch_size * seq_len, context.shape[-1]).detach() if context is not None else None
+        return state, context_state
 
     def _discount_weights(self, continues: torch.Tensor) -> torch.Tensor:
         discounts = self.config.gamma * continues.detach()
@@ -272,7 +318,7 @@ class DreamerV3Agent:
     def train_actor_value(self, batch: dict[str, torch.Tensor]) -> dict[str, float]:
         self.actor.train()
         self.value.train()
-        start_state = self._posterior_start_state(batch)
+        start_state, start_context = self._posterior_start_state(batch)
         self._set_world_model_trainable(False)
 
         imagined = imagine_rollout(
@@ -280,6 +326,7 @@ class DreamerV3Agent:
             actor=self.actor,
             start_state=start_state,
             horizon=self.config.imagination_horizon,
+            start_context=start_context,
         )
         feats = imagined["feats"]
         rewards = imagined["rewards"]
@@ -289,7 +336,11 @@ class DreamerV3Agent:
         flat_feats = feats.reshape(-1, feats.shape[-1])
         values = self._value_forward(flat_feats).view(feats.shape[0], feats.shape[1])
         last_state = {key: value[-1] for key, value in imagined["states"].items()}
-        bootstrap = self._slow_value_forward(self.world_model.rssm.get_feat(last_state)).unsqueeze(0)
+        bootstrap_feat = self.world_model.concat_context(
+            self.world_model.get_base_feat(last_state),
+            imagined.get("last_context"),
+        )
+        bootstrap = self._slow_value_forward(bootstrap_feat).unsqueeze(0)
         all_values = torch.cat([values, bootstrap], dim=0)
         returns = lambda_return(
             rewards=rewards,
@@ -425,40 +476,107 @@ class DreamerV3Agent:
             },
         }
 
+    def _load_module_partial(self, module, state_dict: dict, module_name: str) -> dict[str, object]:
+        current = module.state_dict()
+        compatible = {}
+        unexpected = []
+        shape_mismatches = []
+        for key, value in state_dict.items():
+            if key not in current:
+                unexpected.append(key)
+                continue
+            if current[key].shape != value.shape:
+                shape_mismatches.append(
+                    {
+                        "key": key,
+                        "expected": tuple(current[key].shape),
+                        "got": tuple(value.shape),
+                    }
+                )
+                continue
+            compatible[key] = value
+        load_result = module.load_state_dict(compatible, strict=False)
+        return {
+            "module": module_name,
+            "missing": list(load_result.missing_keys),
+            "unexpected": unexpected,
+            "shape_mismatches": shape_mismatches,
+        }
+
+    def _load_payload(self, payload: dict, allow_partial: bool = False):
+        reports = []
+        modules = [
+            ("world_model", self.world_model, payload["world_model"]),
+            ("actor", self.actor, payload["actor"]),
+            ("value", self.value, payload["value"]),
+        ]
+        if self.slow_value is not None and payload.get("slow_value") is not None:
+            modules.append(("slow_value", self.slow_value, payload["slow_value"]))
+        for module_name, module, state_dict in modules:
+            if not allow_partial:
+                module.load_state_dict(state_dict)
+                continue
+            reports.append(self._load_module_partial(module, state_dict, module_name))
+        if "return_normalizer" in payload:
+            self.return_normalizer = RunningNormalizer.from_state_dict(payload["return_normalizer"])
+        if "advantage_normalizer" in payload:
+            self.advantage_normalizer = RunningNormalizer.from_state_dict(payload["advantage_normalizer"])
+        if "world_model_optimizer" in payload:
+            try:
+                self.world_model_optimizer.load_state_dict(payload["world_model_optimizer"])
+            except (ValueError, RuntimeError):
+                reports.append({"module": "world_model_optimizer", "warning": "optimizer state skipped"})
+        if "actor_optimizer" in payload:
+            try:
+                self.actor_optimizer.load_state_dict(payload["actor_optimizer"])
+            except (ValueError, RuntimeError):
+                reports.append({"module": "actor_optimizer", "warning": "optimizer state skipped"})
+        if "value_optimizer" in payload:
+            try:
+                self.value_optimizer.load_state_dict(payload["value_optimizer"])
+            except (ValueError, RuntimeError):
+                reports.append({"module": "value_optimizer", "warning": "optimizer state skipped"})
+        if "online_update_state" in payload:
+            state = payload["online_update_state"]
+            self._online_train_calls = int(state.get("train_calls", 0))
+            self._online_train_budget = float(state.get("train_budget", 0.0))
+        partial = any(
+            report.get("missing") or report.get("unexpected") or report.get("shape_mismatches") or report.get("warning")
+            for report in reports
+        )
+        if partial:
+            print(
+                "[DreamerV3] Loaded checkpoint with partial parameter reuse. "
+                "This is expected when enabling thick_context on an older checkpoint."
+            )
+        self._last_load_report = {"partial": partial, "reports": reports}
+        return self._last_load_report
+
     def save(self, path: str | Path):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(self.state_dict(), path)
 
     @classmethod
-    def from_state_dict(cls, payload: dict, device: str | None = None):
-        aux = DreamerAuxConfig(**payload["config"]["aux"])
-        observation = DreamerObservationSpec(**payload["config"]["observation"])
-        config_data = dict(payload["config"])
-        config_data["aux"] = aux
-        config_data["observation"] = observation
-        if device is not None:
-            config_data["device"] = device
-        agent = cls(DreamerV3ModelConfig(**config_data), WorldModelLossConfig(**payload["loss_config"]))
-        agent.world_model.load_state_dict(payload["world_model"])
-        agent.actor.load_state_dict(payload["actor"])
-        agent.value.load_state_dict(payload["value"])
-        if agent.slow_value is not None and payload.get("slow_value") is not None:
-            agent.slow_value.load_state_dict(payload["slow_value"])
-        if "return_normalizer" in payload:
-            agent.return_normalizer = RunningNormalizer.from_state_dict(payload["return_normalizer"])
-        if "advantage_normalizer" in payload:
-            agent.advantage_normalizer = RunningNormalizer.from_state_dict(payload["advantage_normalizer"])
-        if "world_model_optimizer" in payload:
-            agent.world_model_optimizer.load_state_dict(payload["world_model_optimizer"])
-        if "actor_optimizer" in payload:
-            agent.actor_optimizer.load_state_dict(payload["actor_optimizer"])
-        if "value_optimizer" in payload:
-            agent.value_optimizer.load_state_dict(payload["value_optimizer"])
-        if "online_update_state" in payload:
-            state = payload["online_update_state"]
-            agent._online_train_calls = int(state.get("train_calls", 0))
-            agent._online_train_budget = float(state.get("train_budget", 0.0))
+    def from_state_dict(
+        cls,
+        payload: dict,
+        device: str | None = None,
+        model_config: DreamerV3ModelConfig | None = None,
+    ):
+        config_override = model_config is not None
+        if model_config is None:
+            aux = DreamerAuxConfig(**payload["config"]["aux"])
+            observation = DreamerObservationSpec(**payload["config"]["observation"])
+            config_data = dict(payload["config"])
+            config_data["aux"] = aux
+            config_data["observation"] = observation
+            if device is not None:
+                config_data["device"] = device
+            model_config = DreamerV3ModelConfig(**config_data)
+        loss_config = None if config_override else WorldModelLossConfig(**payload["loss_config"])
+        agent = cls(model_config, loss_config)
+        agent._load_payload(payload, allow_partial=bool(model_config.thick_context.enabled))
         return agent
 
     @classmethod
