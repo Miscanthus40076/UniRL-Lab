@@ -2,14 +2,20 @@
 
 This guide explains how to integrate a custom policy implementation into this project so it can be used with the existing training, evaluation, and logging tools.
 
-The project does not use a plugin or package registry system. Instead, a policy is added as a folder under `policy/`, wired into `policy/make_policy.py`, and then consumed by `scripts/train.py` and `scripts/run_exam.py`.
+Current rule:
+
+- `policy/<policy_name>/` is the working copy for development.
+- `policy/versions/<version>/<policy_name>/` is the frozen snapshot used by reproducible exams.
+- New iterations must copy an existing frozen version first, then modify the new version.
+- `policy/make_policy.py` constructs policies through `policy/registry.py`, not by binding directly to the latest working copy.
 
 ## Step 1: Create a Policy Folder
 
-Create a dedicated folder under `policy/` for your policy:
+Create a dedicated working folder under `policy/` for your policy, and freeze it into `policy/versions/<version>/` before using it in a real exam:
 
 ```text
 policy/
+├── registry.py
 ├── make_policy.py
 ├── base_policy.py
 ├── my_policy/
@@ -17,6 +23,13 @@ policy/
 │   ├── README.md
 │   ├── ARCHITECTURE.md
 │   └── my_policy_policy_impl.py
+└── versions/
+    └── v1/
+        └── my_policy/
+            ├── __init__.py
+            ├── README.md
+            ├── ARCHITECTURE.md
+            └── my_policy_policy_impl.py
 ```
 
 Recommended files:
@@ -106,20 +119,23 @@ class MyPolicyFolder(BasePolicy):
         ...
 ```
 
-## Step 5: Wire the Policy Into the Factory
+## Step 5: Register the Frozen Policy Version
 
-Add a branch in `policy/make_policy.py` so the runner can create your policy from config:
+Register the frozen version in `policy/registry.py` so the runner can resolve it from config:
 
 ```python
-if policy_type == "my_policy":
-    return MyPolicyFolder(...)
+POLICY_REGISTRY["my_policy"]["v1"] = (
+    "policy.versions.v1.my_policy",
+    "MyPolicyFolder",
+)
 ```
 
-The factory should only do orchestration:
+The factory should only do orchestration through the registry:
 
-- read policy config
+- read `policy.type` and `policy.version`
+- resolve the frozen module/class from `policy/registry.py`
 - pass in environment-derived dimensions or observation example data if needed
-- return the policy instance
+- return the instantiated policy object
 
 Do not embed algorithm logic in the factory.
 
@@ -130,6 +146,7 @@ Policy-specific hyperparameters should live under the `policy` section in the ex
 ```yaml
 policy:
   type: my_policy
+  version: v1
   name: my_policy_baseline
 
   checkpoint:
@@ -203,7 +220,7 @@ Every policy folder should include:
 
 At minimum, verify the following:
 
-- `policy.make_policy()` can create your policy from config
+- `policy.make_policy()` can create your policy from config and version
 - `policy.act(obs)` works with the configured observation type
 - `policy.update(step_batch)` returns the unified metrics payload if training is enabled
 - `scripts/train.py` can run without policy-specific branches
@@ -217,6 +234,17 @@ python -m py_compile policy/make_policy.py scripts/train.py scripts/run_exam.py
 
 and a short training run with a minimal exam config.
 
+Before a real exam, also verify that the exam pins the frozen implementation explicitly:
+
+```yaml
+env:
+  version: v1
+
+policy:
+  type: my_policy
+  version: v1
+```
+
 ## Example Policy Flow
 
 For a latent policy such as DreamerV3, the practical flow is:
@@ -229,6 +257,8 @@ runner -> writes JSONL + CSV -> plotting from JSONL
 
 ## Current Project Rules
 
+- Do not modify an already-used frozen policy version in place
+- Copy `policy/versions/vN/... -> policy/versions/vN+1/...` before iterating
 - Keep environment wrappers minimal
 - Keep policy preprocessing inside the policy
 - Keep training-side plotting generic
@@ -242,6 +272,6 @@ You can inspect these folders for working examples:
 - `policy/random/`
 - `policy/mlp/`
 - `policy/dreamerv3/`
+- `policy/versions/v1/dreamerv3/`
 
-The DreamerV3 wrapper is the most complete example of a learning policy with internal replay, training, checkpointing, and unified metrics output.
-
+The working-copy `policy/dreamerv3/` folder is the current development head. Real exams should bind to a frozen snapshot such as `policy/versions/v1/dreamerv3/`.

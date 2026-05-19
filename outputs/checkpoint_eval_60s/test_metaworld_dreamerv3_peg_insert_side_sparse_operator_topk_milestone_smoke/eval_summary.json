@@ -1,0 +1,148 @@
+{
+  "checkpoint": "/home/y/Simer/exam/test_metaworld_dreamerv3_peg_insert_side_sparse_operator_topk_milestone_smoke/policy.ckpt",
+  "exam": "test_metaworld_dreamerv3_peg_insert_side_sparse_operator_topk_milestone_smoke",
+  "duration_seconds_target": 60.0,
+  "duration_seconds_actual": 64.62145703507122,
+  "env_steps": 4273,
+  "episodes": [
+    {
+      "episode_index": 1,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 2,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 3,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 4,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 5,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 6,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 7,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 8,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 9,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 10,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 11,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 12,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 13,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 14,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 15,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 16,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 17,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 18,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 19,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 20,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 21,
+      "episode_return": 0.0,
+      "episode_length": 200,
+      "success": false
+    },
+    {
+      "episode_index": 22,
+      "episode_return": 0.0,
+      "episode_length": 73,
+      "success": false,
+      "partial": true
+    }
+  ],
+  "success_count": 0,
+  "success_rate": 0.0,
+  "success_metric": "info_success",
+  "success_threshold": 0.0,
+  "gif_path": "outputs/checkpoint_eval_60s/test_metaworld_dreamerv3_peg_insert_side_sparse_operator_topk_milestone_smoke/eval_60s.gif",
+  "frame_count": 1070
+}

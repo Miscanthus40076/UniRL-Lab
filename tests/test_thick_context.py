@@ -20,7 +20,19 @@ def _make_obs_spec():
     return DreamerObservationSpec(mode="vector", obs_dim=8)
 
 
-def _make_model_config(enabled: bool) -> DreamerV3ModelConfig:
+def _make_thick_context(enabled: bool, **kwargs) -> ThickContextConfig:
+    base = {
+        "enabled": enabled,
+        "context_dim": 6,
+        "hidden_dim": 12,
+        "update_penalty": 0.001,
+        "gate_bias_init": -2.0,
+    }
+    base.update(kwargs)
+    return ThickContextConfig(**base)
+
+
+def _make_model_config(enabled: bool, *, thick_context: ThickContextConfig | None = None) -> DreamerV3ModelConfig:
     return DreamerV3ModelConfig(
         action_dim=3,
         observation=_make_obs_spec(),
@@ -37,18 +49,12 @@ def _make_model_config(enabled: bool) -> DreamerV3ModelConfig:
         value_num_layers=2,
         imagination_horizon=4,
         twohot_bins=31,
-        thick_context=ThickContextConfig(
-            enabled=enabled,
-            context_dim=6,
-            hidden_dim=12,
-            update_penalty=0.001,
-            gate_bias_init=-2.0,
-        ),
+        thick_context=thick_context or _make_thick_context(enabled),
     )
 
 
-def _make_world_model(enabled: bool) -> DreamerV3WorldModel:
-    cfg = _make_model_config(enabled)
+def _make_world_model(enabled: bool, *, thick_context: ThickContextConfig | None = None) -> DreamerV3WorldModel:
+    cfg = _make_model_config(enabled, thick_context=thick_context)
     return DreamerV3WorldModel(
         DreamerV3WorldModelConfig(
             obs_dim=cfg.observation.obs_dim,
@@ -111,6 +117,43 @@ def test_gate_range_is_valid():
     assert torch.all(gate <= 1.0)
 
 
+def test_sigmoid_gate_type_matches_previous_soft_behavior():
+    module = SlowContextModule(
+        base_feat_dim=7,
+        config=_make_thick_context(True, context_dim=5, hidden_dim=9, gate_type="sigmoid"),
+    )
+    details = module.forward_details(torch.randn(8, 7))
+    assert details["gate_type"] == "sigmoid"
+    assert torch.allclose(details["gate"], details["gate_soft"])
+    assert torch.allclose(details["gate"], details["gate_hard"])
+    assert torch.allclose(details["gate"], details["open_prob"])
+
+
+def test_l0_st_gate_range_is_valid():
+    torch.manual_seed(0)
+    module = SlowContextModule(
+        base_feat_dim=7,
+        config=_make_thick_context(
+            True,
+            context_dim=5,
+            hidden_dim=9,
+            gate_type="l0_st",
+            l0_temperature=0.5,
+            l0_noise=True,
+            l0_straight_through=True,
+        ),
+    )
+    details = module.forward_details(torch.randn(8, 7))
+    assert details["gate_type"] == "l0_st"
+    assert torch.all(details["gate"] >= 0.0)
+    assert torch.all(details["gate"] <= 1.0)
+    assert torch.all(details["gate_soft"] >= 0.0)
+    assert torch.all(details["gate_soft"] <= 1.0)
+    assert torch.all(details["gate_hard"] >= 0.0)
+    assert torch.all(details["gate_hard"] <= 1.0)
+    assert torch.isfinite(details["open_prob"]).all()
+
+
 def test_is_first_resets_context():
     module = SlowContextModule(base_feat_dim=7, config=ThickContextConfig(enabled=True, context_dim=5, hidden_dim=9))
     base_feat = torch.randn(2, 3, 7)
@@ -119,6 +162,34 @@ def test_is_first_resets_context():
     details = module.forward_details(base_feat, prev_context=prev_context, is_first=is_first)
     assert torch.allclose(details["prev_context"][0, 1], torch.zeros(5), atol=1e-6)
     assert torch.allclose(details["prev_context"][1, 1], details["context"][1, 0], atol=1e-6)
+
+
+def test_l0_st_sequence_shape_and_reset():
+    torch.manual_seed(1)
+    module = SlowContextModule(
+        base_feat_dim=7,
+        config=_make_thick_context(
+            True,
+            context_dim=5,
+            hidden_dim=9,
+            gate_type="l0_st",
+            l0_temperature=0.5,
+            l0_noise=False,
+            l0_straight_through=True,
+        ),
+    )
+    base_feat = torch.randn(2, 4, 7)
+    prev_context = torch.randn(2, 5)
+    is_first = torch.tensor([[0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]])
+    details = module.forward_details(base_feat, prev_context=prev_context, is_first=is_first)
+    assert details["context"].shape == (2, 4, 5)
+    assert details["gate"].shape == (2, 4, 1)
+    assert details["gate_soft"].shape == (2, 4, 1)
+    assert details["gate_hard"].shape == (2, 4, 1)
+    assert details["gate_logit"].shape == (2, 4, 1)
+    assert details["open_prob"].shape == (2, 4, 1)
+    assert torch.allclose(details["prev_context"][0, 1], torch.zeros(5), atol=1e-6)
+    assert torch.allclose(details["prev_context"][1, 2], torch.zeros(5), atol=1e-6)
 
 
 def test_update_penalty_backward_and_metrics():
@@ -138,9 +209,59 @@ def test_update_penalty_backward_and_metrics():
     assert model.slow_context is not None
     assert model.slow_context.gate_net[0].weight.grad is not None
     assert "context_update_loss" in outputs["metrics"]
+    assert "context_update_loss_raw" in outputs["metrics"]
+    assert "context_update_loss_scaled" in outputs["metrics"]
+    assert "model_loss_without_context_penalty" in outputs["metrics"]
+    assert "model_loss_with_context_penalty" in outputs["metrics"]
     assert "context_gate_mean" in outputs["metrics"]
     assert "context_delta_norm_mean" in outputs["metrics"]
     assert torch.isfinite(outputs["metrics"]["context_update_loss"])
+    raw = outputs["metrics"]["context_update_loss_raw"]
+    scaled = outputs["metrics"]["context_update_loss_scaled"]
+    without_penalty = outputs["metrics"]["model_loss_without_context_penalty"]
+    with_penalty = outputs["metrics"]["model_loss_with_context_penalty"]
+    assert torch.allclose(raw, outputs["metrics"]["context_update_loss"])
+    assert torch.allclose(with_penalty, without_penalty + scaled, atol=1e-6, rtol=1e-6)
+
+
+def test_l0_st_update_penalty_backward_and_metrics():
+    torch.manual_seed(0)
+    model = _make_world_model(
+        enabled=True,
+        thick_context=_make_thick_context(
+            True,
+            gate_type="l0_st",
+            l0_temperature=0.5,
+            l0_noise=True,
+            l0_straight_through=True,
+        ),
+    )
+    batch = _make_batch()
+    loss_cfg = WorldModelLossConfig(
+        use_symlog_obs=True,
+        use_symlog_reward=True,
+        use_twohot_reward=True,
+        twohot_bins=31,
+        twohot_low=-20.0,
+        twohot_high=20.0,
+        context_update_penalty=0.001,
+    )
+    outputs = model(batch, loss_cfg)
+    outputs["loss"].backward()
+    metrics = outputs["metrics"]
+    assert model.slow_context is not None
+    assert model.slow_context.gate_net[0].weight.grad is not None
+    assert "context_l0_open_prob" in metrics
+    assert "context_gate_hard_mean" in metrics
+    assert "context_gate_soft_mean" in metrics
+    assert "context_gate_logit_mean" in metrics
+    assert "context_gate_logit_std" in metrics
+    assert torch.isfinite(metrics["context_l0_open_prob"])
+    assert torch.isfinite(metrics["context_gate_hard_mean"])
+    assert torch.isfinite(metrics["context_gate_soft_mean"])
+    assert torch.isfinite(metrics["context_gate_logit_mean"])
+    assert torch.isfinite(metrics["context_gate_logit_std"])
+    assert torch.allclose(metrics["context_update_loss_raw"], metrics["context_l0_open_prob"], atol=1e-6, rtol=1e-6)
 
 
 def test_disabled_context_keeps_original_feat_dim():

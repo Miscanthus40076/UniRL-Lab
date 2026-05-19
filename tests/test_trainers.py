@@ -6,6 +6,7 @@ from scripts.train import BaseExamTrainApp, load_exam_train_app, render_exam_tra
 from scripts.utils.exam import trainer_name, validate_exam_config
 from src.bidreamer.bidirectional_env_factory import _direction_env_config
 from src.trainers.factory import build_trainer
+from src.trainers.online_policy import OnlinePolicyTrainer
 
 
 def _standard_config() -> dict:
@@ -158,3 +159,14 @@ def test_existing_exam_train_entry_loads_from_main_loader():
     assert app.exam_name == "test_dmcontrol_random"
     trainer = app.build_trainer(app.load_config())
     assert trainer.__class__.__name__ == "OnlinePolicyTrainer"
+
+
+def test_gate_video_output_stays_inside_exam_output_dir():
+    config = _standard_config()
+    config["gate_video"] = {"output_subdir": "gate_videos"}
+    exam_dir = Path("/tmp/example_exam")
+    trainer = OnlinePolicyTrainer(config=config, exam_dir=exam_dir, exam_name="example_exam")
+
+    gate_dir = trainer._gate_video_output_root(exam_dir / "output")
+
+    assert gate_dir == exam_dir / "output" / "gate_videos"

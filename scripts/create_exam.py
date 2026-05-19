@@ -28,6 +28,16 @@ def ask_text(prompt, default=None):
     return value
 
 
+def ask_csv_ints(prompt, default=None):
+    default_text = None if default is None else ",".join(str(int(value)) for value in default)
+    value = ask_text(prompt, default_text)
+    if value in ("", "null", "none", "None"):
+        return None
+    parts = [part.strip() for part in str(value).split(",")]
+    parsed = [int(part) for part in parts if part]
+    return parsed or None
+
+
 def ask_int(prompt, default):
     value = input(f"{prompt} [{default}]: ").strip()
     if value == "":
@@ -123,11 +133,10 @@ def main():
 
     env_type = ask_text("Env type", "dmcontrol")
 
-    if env_type != "dmcontrol":
-        raise ValueError("Currently only dmcontrol is supported")
-
     task_entries = []
     if is_multi_task:
+        if env_type != "dmcontrol":
+            raise ValueError("Multi-task create_exam currently only supports dmcontrol")
         task_count = ask_int("Number of tasks", 2)
         for index in range(task_count):
             print(f"\nConfigure task {index + 1}")
@@ -142,10 +151,18 @@ def main():
                 }
             )
     else:
-        env_name = ask_text("Env name", "cartpole_swingup")
-        domain_name = ask_text("dm_control domain_name", "cartpole")
-        task_name = ask_text("dm_control task_name", "swingup")
+        if env_type == "dmcontrol":
+            env_name = ask_text("Env name", "cartpole_swingup")
+            domain_name = ask_text("dm_control domain_name", "cartpole")
+            task_name = ask_text("dm_control task_name", "swingup")
+        elif env_type == "metaworld":
+            task_name = ask_text("MetaWorld task_name", "peg-insert-side-v3")
+            env_name = ask_text("Env name", task_name.replace("-", "_"))
+            domain_name = None
+        else:
+            raise ValueError("Currently only dmcontrol and metaworld are supported")
     num_cams = ask_int("Number of cameras", 1)
+    camera_indices = ask_csv_ints("Camera indices (comma-separated, optional)", None)
 
     enable_render = ask_bool("Enable render", True)
     save_frames = ask_bool("Save frames", True)
@@ -203,12 +220,22 @@ def main():
         },
     }
 
+    if camera_indices is not None:
+        config["env"]["observation"]["camera_indices"] = camera_indices
+        config["env"]["render"]["camera_indices"] = camera_indices
+
     if is_multi_task:
         config["env"]["tasks"] = task_entries
     else:
         config["env"]["name"] = env_name
-        config["env"]["domain_name"] = domain_name
         config["env"]["task_name"] = task_name
+        if env_type == "dmcontrol":
+            config["env"]["domain_name"] = domain_name
+        elif env_type == "metaworld":
+            config["env"]["metaworld"] = {
+                "seed": seed,
+                "reward_function_version": "v2",
+            }
 
     if policy_type == "random":
         config["policy"]["random"] = {

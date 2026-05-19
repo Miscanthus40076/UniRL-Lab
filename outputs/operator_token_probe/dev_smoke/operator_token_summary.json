@@ -1,0 +1,32 @@
+{
+  "total_loss": 0.3759853430092335,
+  "effect_loss_token": 0.03721950575709343,
+  "effect_loss_no_token": 0.039346114033833146,
+  "inverse_action_loss": 0.31930680572986603,
+  "inverse_action_loss_no_token": 0.48748304694890976,
+  "prior_loss": 1.9962262585759163,
+  "usage_entropy_loss": -0.020510193658992648,
+  "token_effect_improvement": 0.05277177087555174,
+  "inverse_action_improvement": 0.34338836558163166,
+  "prior_token_accuracy": 0.0,
+  "random_token_accuracy": 0.125,
+  "capacity_transition_count": 2.0,
+  "token_entropy": 2.0510194152593613,
+  "token_perplexity": 7.780259524890505,
+  "num_active_tokens": 8.0,
+  "bad_numeric_count": 0.0,
+  "token_usage": [
+    0.1221041982062161,
+    0.11343367956578732,
+    0.11626048479229212,
+    0.09665367705747485,
+    0.10127475066110492,
+    0.20168709196150303,
+    0.11184051865711808,
+    0.13674559397622943
+  ],
+  "train_steps": 5,
+  "source_checkpoint": "/home/y/Simer/exam/test_metaworld_dreamerv3_peg_insert_side_thick_event_capacity_v2_smoke/policy.ckpt",
+  "source_exam_dir": "/home/y/Simer/exam/test_metaworld_dreamerv3_peg_insert_side_thick_event_capacity_v2_smoke",
+  "training_finished": true
+}

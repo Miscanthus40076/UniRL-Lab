@@ -5,7 +5,24 @@ description: Use this skill when creating or refactoring policies under `policy/
 
 # Bring Your Own Policy (Project Convention)
 
-本规范用于当前仓库的策略接入，不是外部插件系统。策略通过 `policy/<policy_name>/` + `policy/make_policy.py` 手动接入。
+本规范用于当前仓库的策略接入，不是外部插件系统。策略先在 `policy/<policy_name>/` 作为工作区实现，再冻结到 `policy/versions/<version>/<policy_name>/`，并通过注册表接入。
+
+## 0) 版本冻结优先
+
+当前项目要求：
+
+- 已进入实验的策略实现必须冻结到 `policy/versions/<version>/<policy_name>/`
+- 后续迭代必须先复制旧版本，再修改新版本
+- 禁止直接在已用于实验的版本目录上原地修改
+
+建议流程：
+
+```text
+policy/versions/v1/dreamerv3/   # 已冻结
+policy/versions/v2/dreamerv3/   # 从 v1 复制后继续迭代
+```
+
+`policy/make_policy.py` 应通过注册表解析到冻结版本，而不是直接绑定工作区最新实现。
 
 ## 1) 创建策略目录
 
@@ -120,13 +137,13 @@ from .my_policy_policy_impl import MyPolicy
 __all__ = ["MyPolicy"]
 ```
 
-## 8) 修改 `policy/make_policy.py`
+## 8) 注册到 `policy/registry.py`
 
-使用手动分支接入即可：
+使用注册表接入：
 
-- 读取 `policy.type`
-- 构造对应 policy class
-- 只做对象创建，不写算法逻辑
+- 读取 `policy.type` / `policy.version`
+- 在 `policy/registry.py` 添加 frozen version -> module/class 映射
+- `policy/make_policy.py` 只做对象创建，不写算法逻辑
 
 `make_policy.py` 禁止承载：
 
@@ -228,7 +245,7 @@ runner 从统一 JSONL 记录绘图，不硬编码算法名或 loss 名。
 7. 写 `agent.py`
 8. 写 `*_policy_impl.py`
 9. 在 `__init__.py` 导出类
-10. 在 `make_policy.py` 加分支
+10. 在 `policy/registry.py` 注册冻结版本
 11. 在 `exam/<name>/config.yaml` 添加 policy 配置
 12. 写 `test_policy.py`
 13. 跑 pytest

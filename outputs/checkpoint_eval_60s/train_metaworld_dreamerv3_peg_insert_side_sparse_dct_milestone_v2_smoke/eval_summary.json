@@ -1,0 +1,54 @@
+{
+  "checkpoint": "/home/y/Simer/exam/train_metaworld_dreamerv3_peg_insert_side_sparse_dct_milestone_v2_smoke/policy.ckpt",
+  "exam": "train_metaworld_dreamerv3_peg_insert_side_sparse_dct_milestone_v2_smoke",
+  "duration_seconds_target": 60.0,
+  "duration_seconds_actual": 64.73580762499478,
+  "env_steps": 4190,
+  "episodes": [
+    {
+      "episode_index": 1,
+      "episode_return": 0.0,
+      "episode_length": 1200,
+      "success": false
+    },
+    {
+      "episode_index": 2,
+      "episode_return": 0.0,
+      "episode_length": 1200,
+      "success": false
+    },
+    {
+      "episode_index": 3,
+      "episode_return": 0.0,
+      "episode_length": 1200,
+      "success": false
+    },
+    {
+      "episode_index": 4,
+      "episode_return": 0.0,
+      "episode_length": 590,
+      "success": false,
+      "partial": true
+    }
+  ],
+  "success_count": 0,
+  "success_rate": 0.0,
+  "success_metric": "info_success",
+  "success_threshold": 0.0,
+  "gif_path": "outputs/checkpoint_eval_60s/train_metaworld_dreamerv3_peg_insert_side_sparse_dct_milestone_v2_smoke/eval_60s.gif",
+  "frame_count": 1049,
+  "persistent_enabled": 1.0,
+  "lifetime_step_mean": 1200.0,
+  "lifetime_step_max": 1200.0,
+  "reset_count": 3.0,
+  "reset_reason_max_lifetime": 0.0,
+  "reset_reason_stale": 0.0,
+  "reset_reason_env_done": 0.0,
+  "reset_reason_nan": 0.0,
+  "reset_reason_manual": 3.0,
+  "operator_event_delay_active_ratio": 1.0,
+  "post_event_continuation_steps_mean": 1199.0,
+  "post_event_continuation_steps_max": 1199.0,
+  "episode_unique_token_count_mean": 8.0,
+  "episode_token_perplexity_mean": 4.387065887451172
+}

@@ -39,6 +39,31 @@ def run_policy_evaluation(
     episode_summaries = []
     success_count = 0
 
+    def _preview_transition(next_obs, reward, raw_done):
+        preview = getattr(policy, "preview_transition", None)
+        if callable(preview):
+            payload = preview(next_obs, done=bool(raw_done), reward=float(reward))
+            return dict(payload or {})
+        return {}
+
+    def _finalize_persistent(action, next_obs, raw_done, info, diagnostics):
+        finalize = getattr(env, "finalize_step", None)
+        if callable(finalize):
+            payload = finalize(
+                action=action,
+                next_obs=next_obs,
+                raw_done=bool(raw_done),
+                info=info or {},
+                diagnostics=diagnostics,
+            )
+            if isinstance(payload, dict):
+                return payload
+        return {"done": bool(raw_done), "reset_reason": ("env_done" if raw_done else "NA")}
+
+    clear_history = getattr(env, "clear_persistent_history", None)
+    if callable(clear_history):
+        clear_history()
+
     for episode_idx in range(1, eval_episodes + 1):
         obs = env.reset()
         reset = getattr(policy, "reset", None)
@@ -53,7 +78,11 @@ def run_policy_evaluation(
 
         while not done:
             action = policy.act(obs)
-            obs, reward, done, info = env.step(action)
+            next_obs, reward, raw_done, info = env.step(action)
+            diagnostics = _preview_transition(next_obs, reward=reward, raw_done=bool(raw_done))
+            persistent_result = _finalize_persistent(action, next_obs, raw_done=bool(raw_done), info=info, diagnostics=diagnostics)
+            obs = next_obs
+            done = bool(persistent_result.get("done", False))
             episode_return += reward
             step_in_episode += 1
             final_info = info or {}
@@ -99,6 +128,11 @@ def run_policy_evaluation(
         "episodes": episode_summaries,
         "gif_paths": [str(path) for path in gif_paths],
     }
+    getter = getattr(env, "get_persistent_stats", None)
+    if callable(getter):
+        payload = getter()
+        if isinstance(payload, dict):
+            summary.update(payload)
     summary_path = output_dir / "eval_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(

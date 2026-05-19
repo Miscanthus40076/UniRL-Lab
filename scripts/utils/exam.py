@@ -3,6 +3,9 @@ import re
 
 import yaml
 
+from policy.registry import resolve_policy_spec
+from sim_env.envs.registry import resolve_env_version
+
 
 STANDARD_TRAINERS = {"online_policy", "default", "single_policy"}
 BIDIRECTIONAL_TRAINERS = {"bidirectional", "bidirectional_online", "bidreamer"}
@@ -74,6 +77,7 @@ def _validate_positive_int(field_name: str, value, *, allow_zero: bool = False):
 def _validate_online_policy_exam_config(config):
     train = train_cfg(config)
     policy = config.get("policy", {})
+    env = config.get("env", {})
     checkpoint = policy.get("checkpoint", {})
 
     required_positive_ints = {
@@ -104,6 +108,44 @@ def _validate_online_policy_exam_config(config):
 
     if save_interval > 0 and not bool(checkpoint.get("save", False)):
         raise ValueError("train.save_interval > 0 requires policy.checkpoint.save = true")
+    resolve_policy_spec(policy)
+    resolve_env_version(env)
+    _validate_gate_video_config(config)
+    _validate_persistent_exploration_config(config)
+
+
+def _validate_gate_video_config(config):
+    gate_video = config.get("gate_video")
+    if gate_video is None:
+        return
+    if not isinstance(gate_video, dict):
+        raise TypeError("gate_video must be a mapping")
+    for field in ("interval", "episodes", "max_episode_steps", "gif_fps"):
+        if field in gate_video:
+            _validate_positive_int(f"gate_video.{field}", gate_video[field])
+    if "peak_threshold" in gate_video:
+        peak_threshold = float(gate_video["peak_threshold"])
+        if peak_threshold < 0.0 or peak_threshold > 1.0:
+            raise ValueError("gate_video.peak_threshold must be within [0, 1]")
+    if "output_subdir" in gate_video and not str(gate_video.get("output_subdir", "")).strip():
+        raise ValueError("gate_video.output_subdir must be a non-empty string")
+
+
+def _validate_persistent_exploration_config(config):
+    persistent = config.get("persistent_exploration")
+    if persistent is None:
+        return
+    if not isinstance(persistent, dict):
+        raise TypeError("persistent_exploration must be a mapping")
+    if not bool(persistent.get("enabled", False)):
+        return
+    for field in ("max_lifetime_steps", "stale_window", "operator_event_reset_delay_steps"):
+        if field in persistent:
+            _validate_positive_int(f"persistent_exploration.{field}", persistent[field])
+    if "stale_min_obs_change" in persistent and float(persistent["stale_min_obs_change"]) < 0.0:
+        raise ValueError("persistent_exploration.stale_min_obs_change must be >= 0")
+    if "operator_event_threshold" in persistent and float(persistent["operator_event_threshold"]) < 0.0:
+        raise ValueError("persistent_exploration.operator_event_threshold must be >= 0")
 
 
 def _validate_bidirectional_exam_config(config):
@@ -230,6 +272,7 @@ def output_dir_for_task(exam_dir, config, task_name: str) -> Path:
 def render_cfg(config):
     env_cfg = config.get("env", {})
     render = env_cfg.get("render", {})
+    camera_indices = render.get("camera_indices")
     return {
         "enabled": bool(render.get("enabled", False)),
         "save_frames": bool(render.get("save_frames", False)),
@@ -237,6 +280,7 @@ def render_cfg(config):
         "height": int(render.get("height", 240)),
         "width": int(render.get("width", 320)),
         "camera_id": int(render.get("camera_id", 0)),
+        "camera_indices": [int(value) for value in camera_indices] if isinstance(camera_indices, (list, tuple)) else None,
     }
 
 
