@@ -115,6 +115,37 @@ def _bidirectional_config() -> dict:
     }
 
 
+def _ref_dreamerv3_config() -> dict:
+    config = _standard_config()
+    config["train"]["trainer"] = "ref_dreamerv3"
+    config["train"]["total_steps"] = 10
+    config["train"]["max_episode_steps"] = 100
+    config["policy"] = {
+        "type": "ref_dreamerv3",
+        "ref_dreamerv3": {
+            "configs": ["defaults", "debug"],
+            "overrides": {
+                "jax": {
+                    "platform": "cpu",
+                    "prealloc": False,
+                },
+                "run": {
+                    "envs": 1,
+                    "debug": True,
+                },
+            },
+        },
+    }
+    config["wrappers"] = [
+        {
+            "type": "simer_to_embodied",
+            "version": "v1",
+            "obs_key": "observation",
+        }
+    ]
+    return config
+
+
 def test_standard_config_uses_online_policy_trainer():
     config = _standard_config()
     validate_exam_config(config)
@@ -129,6 +160,14 @@ def test_bidirectional_config_uses_bidirectional_trainer():
     trainer = build_trainer(config=config, exam_dir=Path("/tmp/exam"), exam_name="bidirectional_exam")
     assert trainer_name(config) == "bidirectional"
     assert trainer.__class__.__name__ == "BidirectionalTrainer"
+
+
+def test_ref_dreamerv3_config_uses_ref_trainer():
+    config = _ref_dreamerv3_config()
+    validate_exam_config(config)
+    trainer = build_trainer(config=config, exam_dir=Path("/tmp/exam"), exam_name="ref_dreamerv3_exam")
+    assert trainer_name(config) == "ref_dreamerv3"
+    assert trainer.__class__.__name__ == "RefDreamerV3Trainer"
 
 
 def test_bidirectional_env_resolution_reads_new_train_block():

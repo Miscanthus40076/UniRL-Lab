@@ -1,0 +1,394 @@
+from __future__ import annotations
+
+from dataclasses import asdict
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from ..base_policy import BasePolicy
+from .action_penalty import compute_action_penalty
+from .config import build_dreamerv3_model_config, build_dreamerv3_policy_config
+from .dreamerv3_agent import DreamerV3Agent
+from .dreamerv3_model import DreamerObservationSpec
+from .processor import DreamerV3Processor
+from .replay_buffer import EpisodeReplayBuffer
+
+
+class DreamerV3PolicyFolder(BasePolicy):
+    def __init__(
+        self,
+        action_dim: int,
+        observation_example,
+        policy_config: dict | None = None,
+        exam_dir: str | Path | None = None,
+    ):
+        self.action_dim = int(action_dim)
+        self.exam_dir = Path(exam_dir) if exam_dir is not None else None
+
+        self.policy_cfg, self.checkpoint_cfg = build_dreamerv3_policy_config(policy_config)
+        if (
+            self.policy_cfg.operator_intrinsic_reward.enabled
+            and self.policy_cfg.operator_intrinsic_reward.probe_checkpoint
+        ):
+            self.policy_cfg.operator_intrinsic_reward.probe_checkpoint = str(
+                self._resolve_probe_checkpoint_path(self.policy_cfg.operator_intrinsic_reward.probe_checkpoint)
+            )
+        self.processor = DreamerV3Processor(device=self.policy_cfg.device)
+        self.obs_spec = self.processor.infer_observation_spec(observation_example)
+        self.model_cfg = build_dreamerv3_model_config(self.policy_cfg, self.action_dim, self.obs_spec)
+        self.agent = DreamerV3Agent(self.model_cfg)
+        if self.exam_dir is not None:
+            self.agent.set_output_dir(self.exam_dir / "output")
+        self.contact_label_map: dict[str, int] = {}
+        self.last_checkpoint_load_report: dict[str, object] | None = None
+
+        self._make_replay()
+        self._reset_runtime_state()
+
+        if self.checkpoint_cfg.load and self.checkpoint_cfg.path:
+            self.load(self.checkpoint_cfg.path)
+        else:
+            self.reset()
+
+    def _make_replay(self):
+        self.replay = EpisodeReplayBuffer(
+            capacity=self.policy_cfg.replay_capacity,
+            priority_enabled=self.policy_cfg.priority_replay,
+            priority_exponent=self.policy_cfg.priority_exponent,
+            priority_uniform_mix=self.policy_cfg.priority_uniform_mix,
+            priority_initial=self.policy_cfg.priority_initial,
+        )
+
+    def _reset_runtime_state(self):
+        self.batch_size = int(self.policy_cfg.batch_size)
+        self.seq_len = int(self.policy_cfg.seq_len)
+        self.warmup_steps = int(self.policy_cfg.warmup_steps)
+        self.train_every = max(1, int(self.policy_cfg.train_every))
+        self.train_ratio = float(self.policy_cfg.train_ratio)
+        self.max_updates_per_step = int(self.policy_cfg.max_updates_per_step)
+        self.agent.configure_online_update(
+            batch_size=self.batch_size,
+            seq_len=self.seq_len,
+            warmup_steps=self.warmup_steps,
+            train_every=self.train_every,
+            train_ratio=self.train_ratio,
+            max_updates_per_step=self.max_updates_per_step,
+        )
+        self._current_proprio = None
+        self._pending_pose_probe_target = None
+        self._prev_object_pos = None
+
+    def _resolve_checkpoint_path(self, path: str | Path) -> Path:
+        checkpoint_path = Path(path)
+        if checkpoint_path.is_absolute() or self.exam_dir is None:
+            return checkpoint_path
+        return self.exam_dir / checkpoint_path
+
+    def _resolve_probe_checkpoint_path(self, path: str | Path) -> Path:
+        probe_path = Path(path)
+        if probe_path.is_absolute():
+            return probe_path
+        if self.exam_dir is not None:
+            exam_path = self.exam_dir / probe_path
+            if exam_path.exists():
+                return exam_path
+        project_root = Path(__file__).resolve().parents[2]
+        project_path = project_root / probe_path
+        if project_path.exists():
+            return project_path
+        if self.exam_dir is not None:
+            return self.exam_dir / probe_path
+        return project_path
+
+    def _maybe_contact_label(self, info: dict | None) -> int | None:
+        if self.model_cfg.aux.contact_num_classes is None or not info or "contact_mode" not in info:
+            return None
+        raw = info["contact_mode"]
+        if isinstance(raw, (int, np.integer)):
+            label = int(raw)
+        else:
+            key = str(raw)
+            if key not in self.contact_label_map:
+                next_idx = len(self.contact_label_map)
+                limit = int(self.model_cfg.aux.contact_num_classes)
+                if next_idx >= limit:
+                    return None
+                self.contact_label_map[key] = next_idx
+            label = self.contact_label_map[key]
+        if label < 0 or label >= int(self.model_cfg.aux.contact_num_classes):
+            return None
+        return label
+
+    def _maybe_grasp_label(self, info: dict | None) -> float | None:
+        if not self.model_cfg.aux.predict_grasp or not info or "is_grasping" not in info:
+            return None
+        return float(bool(info["is_grasping"]))
+
+    def _proprio_from_info(self, info: dict | None) -> np.ndarray | None:
+        if not info:
+            return None
+        hand_pos = info.get("hand_pos")
+        if hand_pos is None:
+            return None
+        try:
+            hand_arr = np.asarray(hand_pos, dtype=np.float32).reshape(-1)
+        except Exception:
+            return None
+        if hand_arr.size < 3:
+            return None
+        values = [float(hand_arr[0]), float(hand_arr[1]), float(hand_arr[2])]
+        gripper_state = info.get("gripper_state")
+        if gripper_state is not None:
+            try:
+                values.append(float(gripper_state))
+            except (TypeError, ValueError):
+                pass
+        return np.asarray(values, dtype=np.float32)
+
+    def _pose_probe_target_from_info(self, info: dict | None) -> np.ndarray | None:
+        if not info:
+            return None
+        target = np.full(8, np.nan, dtype=np.float32)
+        hand_pos = info.get("hand_pos")
+        if hand_pos is not None:
+            hand_arr = np.asarray(hand_pos, dtype=np.float32).reshape(-1)
+            if hand_arr.size >= 3:
+                target[0:3] = hand_arr[:3]
+        if "gripper_state" in info and info["gripper_state"] is not None:
+            try:
+                target[3] = float(info["gripper_state"])
+            except (TypeError, ValueError):
+                pass
+        object_pos = info.get("object_pos")
+        if object_pos is not None:
+            obj_arr = np.asarray(object_pos, dtype=np.float32).reshape(-1)
+            if obj_arr.size >= 3:
+                target[4:7] = obj_arr[:3]
+        if np.isfinite(target[0:3]).all() and np.isfinite(target[4:7]).all():
+            target[7] = float(np.linalg.norm(target[0:3] - target[4:7]))
+        return None if not np.isfinite(target).any() else target
+
+    def act(self, obs, deterministic: bool = False):
+        self.agent.set_rollout_mode(bool(deterministic))
+        obs_array = self.processor.preprocess_obs(obs, self.obs_spec)
+        prev_action = self._prev_action.copy()
+        self.agent.update_latent(
+            obs_array,
+            prev_action,
+            is_first=self._episode_is_first,
+            proprio=self._current_proprio,
+        )
+        self._latent_prev_action = prev_action
+        raw_action = self.agent.act(deterministic=deterministic)
+        action = self.processor.postprocess_action(raw_action)
+        self._prev_action = action
+        self._episode_is_first = False
+        return action
+
+    def update(self, step_batch: dict) -> dict[str, object]:
+        obs = self.processor.preprocess_obs(step_batch["obs"], self.obs_spec)
+        next_obs = self.processor.preprocess_obs(step_batch["next_obs"], self.obs_spec)
+        done = bool(step_batch["done"])
+        info = step_batch.get("info") or {}
+        current_pose_probe_target = self._pending_pose_probe_target
+        next_pose_probe_target = self._pose_probe_target_from_info(info)
+        proprio = self._proprio_from_info(info)
+        event_metrics = self.agent.observe_event_transition(
+            next_obs,
+            done=done,
+            reward=float(step_batch["reward"]),
+            update_operator_state=True,
+            proprio=proprio,
+        )
+        hand_pos = None if info.get("hand_pos") is None else np.asarray(info.get("hand_pos"), dtype=np.float32).reshape(-1)
+        object_pos = None if info.get("object_pos") is None else np.asarray(info.get("object_pos"), dtype=np.float32).reshape(-1)
+        hand_object_distance = float(np.linalg.norm(hand_pos[:3] - object_pos[:3])) if hand_pos is not None and object_pos is not None and hand_pos.size >= 3 and object_pos.size >= 3 else None
+        object_delta = (
+            float(np.linalg.norm(object_pos[:3] - self._prev_object_pos[:3]))
+            if object_pos is not None and self._prev_object_pos is not None and object_pos.size >= 3 and self._prev_object_pos.size >= 3
+            else 0.0
+        )
+        object_static = bool(object_delta <= 1e-3)
+        object_moving = bool(object_delta > 1e-3)
+        no_contact = bool(hand_object_distance is None or hand_object_distance >= 0.04)
+        object_coupled = bool((hand_object_distance is not None and hand_object_distance < 0.04) and object_moving)
+        hand_high_object_static = bool(
+            hand_pos is not None
+            and object_pos is not None
+            and hand_pos.size >= 3
+            and object_pos.size >= 3
+            and (hand_pos[2] - object_pos[2] > 0.05)
+            and object_static
+        )
+        raw_reward = float(event_metrics.get("wm/raw_slow_gain_reward_mean", 0.0) or 0.0)
+        external_reward = float(event_metrics.get("wm/external_slow_gain_reward_mean", 0.0) or 0.0)
+        v8_reward = float(event_metrics.get("wm/v8_confirm_reward_mean", 0.0) or 0.0)
+        if no_contact:
+            event_metrics["intrinsic/raw_slow_gain_reward_when_no_contact"] = raw_reward
+            event_metrics["intrinsic/external_slow_gain_reward_when_no_contact"] = external_reward
+            event_metrics["intrinsic/v8_confirm_reward_when_no_contact"] = v8_reward
+            event_metrics["intrinsic/no_contact_v8_to_raw_ratio"] = v8_reward / (raw_reward + 1e-8)
+            event_metrics["intrinsic/no_contact_v8_to_external_ratio"] = v8_reward / (external_reward + 1e-8)
+        if object_static:
+            event_metrics["intrinsic/raw_slow_gain_reward_when_object_static"] = raw_reward
+            event_metrics["intrinsic/external_slow_gain_reward_when_object_static"] = external_reward
+            event_metrics["intrinsic/v8_confirm_reward_when_object_static"] = v8_reward
+            event_metrics["intrinsic/object_static_v8_to_raw_ratio"] = v8_reward / (raw_reward + 1e-8)
+            event_metrics["intrinsic/object_static_v8_to_external_ratio"] = v8_reward / (external_reward + 1e-8)
+        if hand_high_object_static:
+            event_metrics["intrinsic/raw_slow_gain_reward_when_hand_high_object_static"] = raw_reward
+            event_metrics["intrinsic/external_slow_gain_reward_when_hand_high_object_static"] = external_reward
+            event_metrics["intrinsic/v8_confirm_reward_when_hand_high_object_static"] = v8_reward
+            event_metrics["intrinsic/hand_high_object_static_v8_to_raw_ratio"] = v8_reward / (raw_reward + 1e-8)
+            event_metrics["intrinsic/hand_high_object_static_v8_to_external_ratio"] = v8_reward / (external_reward + 1e-8)
+        if object_moving:
+            event_metrics["intrinsic/raw_slow_gain_reward_when_object_moving"] = raw_reward
+            event_metrics["intrinsic/external_slow_gain_reward_when_object_moving"] = external_reward
+            event_metrics["intrinsic/v8_confirm_reward_when_object_moving"] = v8_reward
+            event_metrics["intrinsic/object_moving_v8_to_raw_ratio"] = v8_reward / (raw_reward + 1e-8)
+            event_metrics["intrinsic/object_moving_v8_to_external_ratio"] = v8_reward / (external_reward + 1e-8)
+        if object_coupled:
+            event_metrics["intrinsic/raw_slow_gain_reward_when_object_coupled"] = raw_reward
+            event_metrics["intrinsic/external_slow_gain_reward_when_object_coupled"] = external_reward
+            event_metrics["intrinsic/v8_confirm_reward_when_object_coupled"] = v8_reward
+            event_metrics["intrinsic/object_coupled_v8_to_raw_ratio"] = v8_reward / (raw_reward + 1e-8)
+            event_metrics["intrinsic/object_coupled_v8_to_external_ratio"] = v8_reward / (external_reward + 1e-8)
+        self._prev_object_pos = None if done or object_pos is None else object_pos.copy()
+        raw_env_reward = float(step_batch["reward"])
+        operator_milestone_reward = 0.0
+        if (
+            self.policy_cfg.operator_intrinsic_reward.enabled
+            and self.policy_cfg.operator_intrinsic_reward.reward_mode == "dct_unigram_milestone"
+            and self.policy_cfg.operator_intrinsic_reward.store_reward_in_replay
+        ):
+            operator_milestone_reward = float(event_metrics.get("operator_reward") or 0.0)
+        action_tensor = torch.as_tensor(np.asarray(step_batch.get("action", self._prev_action), dtype=np.float32)).reshape(-1)
+        prev_action_tensor = torch.as_tensor(np.asarray(self._latent_prev_action, dtype=np.float32)).reshape(-1)
+        action_penalty_tensor, action_penalty_info = compute_action_penalty(
+            action_tensor,
+            prev_action=prev_action_tensor,
+            config=self.policy_cfg.action_penalty,
+        )
+        action_penalty = float(action_penalty_tensor.detach().cpu())
+        train_reward = (
+            raw_env_reward
+            + float(self.policy_cfg.operator_intrinsic_reward.beta) * operator_milestone_reward
+            - action_penalty
+        )
+        event_metrics.update(
+            {
+                "action_penalty_mean": action_penalty,
+                "action_penalty_max": action_penalty,
+                "action_penalty_nonzero_ratio": float(action_penalty > 0.0),
+                "action_norm_mean": float(action_penalty_info["action_norm"].detach().cpu()),
+                "action_delta_norm_mean": float(action_penalty_info["action_delta_norm"].detach().cpu()),
+                "train_reward_action_penalty_mean": -action_penalty,
+            }
+        )
+
+        self.replay.add_step(
+            obs=obs,
+            action=np.asarray(self._latent_prev_action, dtype=np.float32).reshape(-1),
+            reward=train_reward,
+            done=done,
+            contact_mode=self._maybe_contact_label(info),
+            is_grasping=self._maybe_grasp_label(info),
+            raw_env_reward=raw_env_reward,
+            operator_milestone_reward=operator_milestone_reward,
+            action_penalty=action_penalty,
+            proprio=proprio,
+            pose_probe_target=current_pose_probe_target,
+        )
+        self._pending_pose_probe_target = None if done else next_pose_probe_target
+        if done:
+            self.reset()
+
+        include_contact = self.model_cfg.aux.contact_num_classes is not None
+        include_grasp = self.model_cfg.aux.predict_grasp
+        metrics, metadata = self.agent.update_from_replay(
+            replay=self.replay,
+            include_contact=include_contact,
+            include_grasp=include_grasp,
+        )
+        for key, value in event_metrics.items():
+            if isinstance(value, (int, float)) and key not in metrics:
+                metrics[key] = float(value)
+        return self._build_metrics_payload(scalars=metrics, metadata=metadata)
+
+    def set_observation_info(self, info: dict | None):
+        self._current_proprio = self._proprio_from_info(info)
+
+    def observe_transition(self, next_obs, done: bool = False, reward: float | None = None):
+        processed = self.processor.preprocess_obs(next_obs, self.obs_spec)
+        return self.agent.observe_event_transition(
+            processed,
+            done=done,
+            reward=reward,
+            update_operator_state=True,
+            proprio=self._current_proprio,
+        )
+
+    def preview_transition(self, next_obs, done: bool = False, reward: float | None = None):
+        processed = self.processor.preprocess_obs(next_obs, self.obs_spec)
+        return self.agent.preview_event_transition(processed, done=done, reward=reward)
+
+    def reset(self):
+        if self.replay.current["obs"]:
+            self.replay.end_episode()
+        self.agent.reset_latent(batch_size=1)
+        self._prev_action = np.zeros(self.action_dim, dtype=np.float32)
+        self._latent_prev_action = np.zeros(self.action_dim, dtype=np.float32)
+        self._episode_is_first = True
+        self._current_proprio = None
+        self._pending_pose_probe_target = None
+        self._prev_object_pos = None
+
+    def get_diagnostics(self) -> dict[str, object]:
+        return {
+            "context": self.agent.get_context_diagnostics(),
+            "event": self.agent.get_event_diagnostics(),
+            "gate": self.agent.get_gate_diagnostics(),
+        }
+
+    def get_gate_diagnostics(self) -> dict[str, object]:
+        return self.agent.get_gate_diagnostics()
+
+    def save(self, path: str | Path):
+        path = self._resolve_checkpoint_path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "policy_type": "dreamerv3",
+                "policy_config": self.policy_cfg.asdict(),
+                "observation_spec": asdict(self.obs_spec),
+                "action_dim": self.action_dim,
+                "contact_label_map": self.contact_label_map,
+                "agent": self.agent.state_dict(),
+            },
+            path,
+        )
+
+    def load(self, path: str | Path):
+        payload = torch.load(self._resolve_checkpoint_path(path), map_location=self.policy_cfg.device)
+        if payload.get("policy_type") != "dreamerv3":
+            raise ValueError("Checkpoint is not a DreamerV3 policy checkpoint")
+        saved_action_dim = int(payload["action_dim"])
+        saved_obs_spec = DreamerObservationSpec(**payload["observation_spec"])
+        if saved_action_dim != self.action_dim:
+            raise ValueError(f"Checkpoint action_dim={saved_action_dim} does not match current action_dim={self.action_dim}")
+        if saved_obs_spec != self.obs_spec:
+            raise ValueError(
+                f"Checkpoint observation spec {saved_obs_spec.asdict()} does not match current spec {self.obs_spec.asdict()}"
+            )
+        self.agent = DreamerV3Agent.from_state_dict(
+            payload["agent"],
+            device=self.model_cfg.device,
+            model_config=self.model_cfg,
+        )
+        self.contact_label_map = dict(payload.get("contact_label_map", {}))
+        self.last_checkpoint_load_report = getattr(self.agent, "_last_load_report", None)
+
+        self._make_replay()
+        self._reset_runtime_state()
+        self.reset()

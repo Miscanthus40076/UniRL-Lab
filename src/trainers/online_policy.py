@@ -5,6 +5,8 @@ import math
 from pathlib import Path
 import time
 
+import numpy as np
+
 from policy.registry import maybe_record_gate_eval_videos_for_policy
 from policy.make_policy import make_policy
 from scripts.utils import (
@@ -28,6 +30,90 @@ def maybe_update(policy, batch):
     if not callable(update):
         return normalize_policy_metrics(None)
     return normalize_policy_metrics(update(batch))
+
+
+def _scalar_from_value(value):
+    if value is None:
+        return None
+    if isinstance(value, (bool, int, float)):
+        return float(value)
+    if isinstance(value, np.ndarray):
+        if value.size == 1:
+            return float(value.reshape(-1)[0])
+        return None
+    if isinstance(value, (list, tuple)) and len(value) == 1:
+        try:
+            return float(value[0])
+        except (TypeError, ValueError):
+            return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _vector_from_value(value):
+    if value is None:
+        return None
+    try:
+        array = np.asarray(value, dtype=np.float32).reshape(-1)
+    except (TypeError, ValueError):
+        return None
+    if array.size == 0:
+        return None
+    return array
+
+
+def _extract_contact_signal(info: dict) -> float | None:
+    for key in ("contact", "is_contact", "touch", "collision"):
+        value = _scalar_from_value(info.get(key))
+        if value is not None:
+            return 1.0 if value > 0.0 else 0.0
+    return None
+
+
+def _extract_success_signal(info: dict) -> float | None:
+    for key in ("success", "is_success"):
+        value = _scalar_from_value(info.get(key))
+        if value is not None:
+            return 1.0 if value > 0.0 else 0.0
+    return None
+
+
+def _extract_object_position(info: dict):
+    for key in (
+        "object_pos",
+        "obj_pos",
+        "rod_pos",
+        "peg_pos",
+        "peg_head_pos",
+        "target_object_pos",
+    ):
+        value = _vector_from_value(info.get(key))
+        if value is not None and value.size >= 2:
+            return value
+    return None
+
+
+def _extract_hand_position(info: dict):
+    for key in ("hand_pos", "tcp_center", "eef_pos", "gripper_pos"):
+        value = _vector_from_value(info.get(key))
+        if value is not None and value.size >= 3:
+            return value[:3]
+    return None
+
+
+def _mean_or_none(values):
+    if not values:
+        return None
+    return float(np.mean(values))
+
+
+OBJECT_DELTA_THRESHOLD = 1e-3
+OBJECT_LIFT_DELTA_THRESHOLD = 5e-4
+HAND_OBJECT_DISTANCE_THRESHOLD = 0.04
+OBJECT_HIGH_DELTA_THRESHOLD = 0.01
+HAND_HIGH_MARGIN_THRESHOLD = 0.05
 
 
 class OnlinePolicyTrainer(Trainer):
@@ -203,18 +289,111 @@ class OnlinePolicyTrainer(Trainer):
         print(f"Training task: {task['name']}")
         print(f"Saved run manifest: {manifest_path}")
         obs = env.reset()
+        if hasattr(policy, "set_observation_info"):
+            policy.set_observation_info({})
         if self._persistent_enabled():
             self._clear_persistent_history(env)
         episode_return = 0.0
         episode_length = 0
         episode_index = 0
         start_time = time.time()
+        contact_values: list[float] = []
+        object_motion_values: list[float] = []
+        success_values: list[float] = []
+        hand_z_values: list[float] = []
+        object_z_values: list[float] = []
+        object_delta_values: list[float] = []
+        object_lift_delta_values: list[float] = []
+        hand_object_distance_values: list[float] = []
+        contact_proxy_values: list[float] = []
+        condition_names = (
+            "object_moving",
+            "object_static",
+            "object_lifting",
+            "object_not_lifting",
+            "contact_proxy",
+            "no_contact",
+            "hand_high_object_static",
+            "hand_high_object_high",
+            "object_coupled",
+            "not_object_coupled",
+        )
+        conditioned_reward_sums = {key: 0.0 for key in condition_names}
+        conditioned_reward_counts = {key: 0 for key in condition_names}
+        raw_conditioned_reward_sums = {key: 0.0 for key in condition_names}
+        external_conditioned_reward_sums = {key: 0.0 for key in condition_names}
+        prev_object_pos = None
+        prev_object_z: float | None = None
+        object_z_baseline: float | None = None
+        raw_done_count = 0
+        reset_trigger_count = 0
+        raw_done_with_reset_count = 0
+        raw_done_without_reset_count = 0
+        reset_without_raw_done_count = 0
+        last_raw_done_step: int | None = None
+        last_reset_step: int | None = None
+        metrics_window_steps = 0
 
         try:
             for step in range(1, total_steps + 1):
+                metrics_window_steps += 1
                 action = policy.act(obs)
                 next_obs, reward, raw_done, info = env.step(action)
                 info = dict(info or {})
+                if hasattr(policy, "set_observation_info"):
+                    policy.set_observation_info(info)
+                contact_signal = _extract_contact_signal(info)
+                if contact_signal is not None:
+                    contact_values.append(contact_signal)
+                success_signal = _extract_success_signal(info)
+                if success_signal is not None:
+                    success_values.append(success_signal)
+                hand_pos = _extract_hand_position(info)
+                object_pos = _extract_object_position(info)
+                hand_z = None if hand_pos is None or hand_pos.size < 3 else float(hand_pos[2])
+                object_z = None if object_pos is None or object_pos.size < 3 else float(object_pos[2])
+                if hand_z is not None:
+                    hand_z_values.append(hand_z)
+                if object_z is not None:
+                    object_z_values.append(object_z)
+                    if object_z_baseline is None:
+                        object_z_baseline = object_z
+                object_delta = None
+                if object_pos is not None and prev_object_pos is not None and object_pos.shape == prev_object_pos.shape:
+                    object_delta = float(np.linalg.norm(object_pos - prev_object_pos))
+                    object_motion_values.append(object_delta)
+                    object_delta_values.append(object_delta)
+                object_lift_delta = None
+                if object_z is not None and prev_object_z is not None:
+                    object_lift_delta = float(object_z - prev_object_z)
+                    object_lift_delta_values.append(object_lift_delta)
+                hand_object_distance = _scalar_from_value(info.get("hand_object_distance"))
+                if hand_object_distance is None and hand_pos is not None and object_pos is not None and hand_pos.shape[0] >= 3 and object_pos.shape[0] >= 3:
+                    hand_object_distance = float(np.linalg.norm(hand_pos[:3] - object_pos[:3]))
+                if hand_object_distance is not None:
+                    hand_object_distance_values.append(hand_object_distance)
+                object_moving = bool(object_delta is not None and object_delta > OBJECT_DELTA_THRESHOLD)
+                object_static = bool(object_delta is not None and object_delta <= OBJECT_DELTA_THRESHOLD)
+                object_lifting = bool(object_lift_delta is not None and object_lift_delta > OBJECT_LIFT_DELTA_THRESHOLD)
+                object_not_lifting = bool(object_lift_delta is not None and object_lift_delta <= OBJECT_LIFT_DELTA_THRESHOLD)
+                contact_proxy = bool(
+                    hand_object_distance is not None and hand_object_distance < HAND_OBJECT_DISTANCE_THRESHOLD
+                )
+                if hand_object_distance is not None:
+                    contact_proxy_values.append(1.0 if contact_proxy else 0.0)
+                object_high = bool(
+                    object_z is not None
+                    and object_z_baseline is not None
+                    and (object_z - object_z_baseline) > OBJECT_HIGH_DELTA_THRESHOLD
+                )
+                hand_high = bool(
+                    hand_z is not None
+                    and object_z is not None
+                    and (hand_z - object_z) > HAND_HIGH_MARGIN_THRESHOLD
+                )
+                object_coupled = bool(contact_proxy and object_moving)
+                prev_object_pos = None if object_pos is None else object_pos.copy()
+                prev_object_z = object_z
                 if self._persistent_enabled():
                     preview_metrics = self._persistent_preview_metrics(policy, next_obs, reward=float(reward), raw_done=bool(raw_done))
                     persistent_result = self._persistent_finalize(
@@ -231,6 +410,19 @@ class OnlinePolicyTrainer(Trainer):
                 else:
                     forced_done = max_episode_steps is not None and episode_length + 1 >= int(max_episode_steps)
                     done = bool(raw_done or forced_done)
+
+                if raw_done:
+                    raw_done_count += 1
+                    last_raw_done_step = int(step)
+                if done:
+                    reset_trigger_count += 1
+                    last_reset_step = int(step)
+                if raw_done and done:
+                    raw_done_with_reset_count += 1
+                elif raw_done and not done:
+                    raw_done_without_reset_count += 1
+                elif done and not raw_done:
+                    reset_without_raw_done_count += 1
 
                 episode_return += float(reward)
                 episode_length += 1
@@ -250,6 +442,121 @@ class OnlinePolicyTrainer(Trainer):
                 )
                 metrics = metrics_row_from_payload(policy_metrics)
                 metrics.update(self._persistent_stats(env))
+                slow_gain_reward_value = _scalar_from_value(metrics.get("intrinsic/slow_gain_reward_mean"))
+                raw_slow_gain_reward_value = _scalar_from_value(metrics.get("intrinsic/raw_slow_gain_reward_mean"))
+                external_slow_gain_reward_value = _scalar_from_value(metrics.get("intrinsic/external_slow_gain_reward_mean"))
+                for name, condition in (
+                    ("object_moving", object_moving),
+                    ("object_static", object_static),
+                    ("object_lifting", object_lifting),
+                    ("object_not_lifting", object_not_lifting),
+                    ("contact_proxy", contact_proxy),
+                    ("no_contact", hand_object_distance is not None and not contact_proxy),
+                    ("hand_high_object_static", hand_high and object_static),
+                    ("hand_high_object_high", hand_high and object_high),
+                    ("object_coupled", object_coupled),
+                    ("not_object_coupled", hand_object_distance is not None and not object_coupled),
+                ):
+                    if not condition:
+                        continue
+                    conditioned_reward_counts[name] += 1
+                    if slow_gain_reward_value is not None:
+                        conditioned_reward_sums[name] += float(slow_gain_reward_value)
+                    if raw_slow_gain_reward_value is not None:
+                        raw_conditioned_reward_sums[name] += float(raw_slow_gain_reward_value)
+                    if external_slow_gain_reward_value is not None:
+                        external_conditioned_reward_sums[name] += float(external_slow_gain_reward_value)
+                if contact_values:
+                    metrics["env/contact_rate"] = float(np.mean(contact_values))
+                if hand_z_values:
+                    metrics["env/hand_z"] = float(np.mean(hand_z_values))
+                if object_z_values:
+                    metrics["env/object_z"] = float(np.mean(object_z_values))
+                if object_motion_values:
+                    metrics["env/object_motion"] = float(np.mean(object_motion_values))
+                if object_delta_values:
+                    metrics["env/object_delta"] = float(np.mean(object_delta_values))
+                    metrics["env/object_motion_rate"] = float(
+                        np.mean(np.asarray(object_delta_values, dtype=np.float32) > OBJECT_DELTA_THRESHOLD)
+                    )
+                if object_lift_delta_values:
+                    metrics["env/object_lift_delta"] = float(np.mean(object_lift_delta_values))
+                    metrics["env/object_lift_rate"] = float(
+                        np.mean(np.asarray(object_lift_delta_values, dtype=np.float32) > OBJECT_LIFT_DELTA_THRESHOLD)
+                    )
+                if hand_object_distance_values:
+                    metrics["env/hand_object_distance"] = float(np.mean(hand_object_distance_values))
+                if contact_proxy_values:
+                    metrics["env/contact_proxy_rate"] = float(np.mean(contact_proxy_values))
+                if success_values:
+                    metrics["env/success_rate"] = float(np.mean(success_values))
+                for name, metric_key in (
+                    ("object_moving", "intrinsic/slow_gain_reward_when_object_moving"),
+                    ("object_static", "intrinsic/slow_gain_reward_when_object_static"),
+                    ("object_lifting", "intrinsic/slow_gain_reward_when_object_lifting"),
+                    ("object_not_lifting", "intrinsic/slow_gain_reward_when_object_not_lifting"),
+                    ("contact_proxy", "intrinsic/slow_gain_reward_when_contact_proxy"),
+                    ("no_contact", "intrinsic/slow_gain_reward_when_no_contact"),
+                    ("hand_high_object_static", "intrinsic/slow_gain_reward_when_hand_high_object_static"),
+                    ("hand_high_object_high", "intrinsic/slow_gain_reward_when_hand_high_object_high"),
+                    ("object_coupled", "intrinsic/slow_gain_reward_when_object_coupled"),
+                    ("not_object_coupled", "intrinsic/slow_gain_reward_when_not_object_coupled"),
+                ):
+                    count = conditioned_reward_counts[name]
+                    if count > 0:
+                        metrics[metric_key] = float(conditioned_reward_sums[name] / count)
+                for name, metric_key in (
+                    ("no_contact", "intrinsic/raw_slow_gain_reward_when_no_contact"),
+                    ("object_static", "intrinsic/raw_slow_gain_reward_when_object_static"),
+                    ("hand_high_object_static", "intrinsic/raw_slow_gain_reward_when_hand_high_object_static"),
+                    ("object_moving", "intrinsic/raw_slow_gain_reward_when_object_moving"),
+                    ("object_coupled", "intrinsic/raw_slow_gain_reward_when_object_coupled"),
+                ):
+                    count = conditioned_reward_counts[name]
+                    if count > 0:
+                        metrics[metric_key] = float(raw_conditioned_reward_sums[name] / count)
+                for name, metric_key in (
+                    ("no_contact", "intrinsic/external_slow_gain_reward_when_no_contact"),
+                    ("object_static", "intrinsic/external_slow_gain_reward_when_object_static"),
+                    ("hand_high_object_static", "intrinsic/external_slow_gain_reward_when_hand_high_object_static"),
+                    ("object_moving", "intrinsic/external_slow_gain_reward_when_object_moving"),
+                    ("object_coupled", "intrinsic/external_slow_gain_reward_when_object_coupled"),
+                ):
+                    count = conditioned_reward_counts[name]
+                    if count > 0:
+                        metrics[metric_key] = float(external_conditioned_reward_sums[name] / count)
+                for name, metric_key in (
+                    ("no_contact", "intrinsic/no_contact_external_to_raw_ratio"),
+                    ("object_static", "intrinsic/object_static_external_to_raw_ratio"),
+                    ("hand_high_object_static", "intrinsic/hand_high_object_static_external_to_raw_ratio"),
+                    ("object_moving", "intrinsic/object_moving_external_to_raw_ratio"),
+                    ("object_coupled", "intrinsic/object_coupled_external_to_raw_ratio"),
+                ):
+                    count = conditioned_reward_counts[name]
+                    if count <= 0:
+                        continue
+                    raw_mean = raw_conditioned_reward_sums[name] / count
+                    external_mean = external_conditioned_reward_sums[name] / count
+                    metrics[metric_key] = float(external_mean / (raw_mean + 1e-8))
+                metrics["env/raw_done_count"] = float(raw_done_count)
+                metrics["env/raw_done_rate"] = float(raw_done_count / max(1, metrics_window_steps))
+                metrics["env/reset_trigger_count"] = float(reset_trigger_count)
+                metrics["env/reset_trigger_rate"] = float(reset_trigger_count / max(1, metrics_window_steps))
+                metrics["env/raw_done_with_reset_count"] = float(raw_done_with_reset_count)
+                metrics["env/raw_done_without_reset_count"] = float(raw_done_without_reset_count)
+                metrics["env/reset_without_raw_done_count"] = float(reset_without_raw_done_count)
+                metrics["env/raw_done_suppressed_rate"] = float(
+                    raw_done_without_reset_count / max(1, raw_done_count)
+                )
+                metrics["env/reset_from_raw_done_rate"] = float(
+                    raw_done_with_reset_count / max(1, reset_trigger_count)
+                )
+                metrics["env/last_raw_done_step"] = float(last_raw_done_step) if last_raw_done_step is not None else -1.0
+                metrics["env/last_reset_step"] = float(last_reset_step) if last_reset_step is not None else -1.0
+                if last_raw_done_step is not None and last_reset_step is not None:
+                    metrics["env/raw_done_reset_step_gap"] = float(last_reset_step - last_raw_done_step)
+                else:
+                    metrics["env/raw_done_reset_step_gap"] = -1.0
 
                 if step % record_interval == 0 or done or step == total_steps:
                     elapsed = max(time.time() - start_time, 1e-6)
@@ -271,6 +578,7 @@ class OnlinePolicyTrainer(Trainer):
                             "episode_length": episode_length,
                             "train_scalars": train_scalars,
                             "policy_metrics": policy_metrics,
+                            "logged_metrics": metrics,
                             "persistent_stats": self._persistent_stats(env),
                             "persistent_step_metrics": (
                                 getattr(env, "get_persistent_step_metrics", lambda: {})()
@@ -280,6 +588,26 @@ class OnlinePolicyTrainer(Trainer):
                         }
                     )
                     plot_policy_metrics_jsonl(policy_metrics_path, plots_dir, x_key="step")
+                    contact_values.clear()
+                    hand_z_values.clear()
+                    object_z_values.clear()
+                    object_motion_values.clear()
+                    object_delta_values.clear()
+                    object_lift_delta_values.clear()
+                    hand_object_distance_values.clear()
+                    contact_proxy_values.clear()
+                    success_values.clear()
+                    for key in conditioned_reward_sums:
+                        conditioned_reward_sums[key] = 0.0
+                        raw_conditioned_reward_sums[key] = 0.0
+                        external_conditioned_reward_sums[key] = 0.0
+                        conditioned_reward_counts[key] = 0
+                    raw_done_count = 0
+                    reset_trigger_count = 0
+                    raw_done_with_reset_count = 0
+                    raw_done_without_reset_count = 0
+                    reset_without_raw_done_count = 0
+                    metrics_window_steps = 0
 
                 if step % log_interval == 0:
                     reset_reason = info.get("persistent_reset_reason", "NA") if self._persistent_enabled() else "NA"
@@ -336,8 +664,11 @@ class OnlinePolicyTrainer(Trainer):
                         reset()
                     episode_index += 1
                     obs = env.reset()
+                    if hasattr(policy, "set_observation_info"):
+                        policy.set_observation_info({})
                     episode_return = 0.0
                     episode_length = 0
+                    prev_object_pos = None
         finally:
             checkpoint_paths = self._save_checkpoint(policy, policy_config, output_dir)
             if checkpoint_paths is not None:

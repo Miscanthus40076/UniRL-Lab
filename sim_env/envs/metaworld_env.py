@@ -243,6 +243,36 @@ class MetaWorldEnv(BaseEnv):
             return self._render_obs()
         return self._flatten_obs(obs)
 
+    def _enrich_info_with_positions(self, raw_obs, info: dict):
+        try:
+            obs_vec = np.asarray(raw_obs, dtype=np.float32).reshape(-1)
+        except Exception:
+            obs_vec = None
+        if obs_vec is not None and obs_vec.size >= 7:
+            info.setdefault("gripper_state", float(obs_vec[3]) if obs_vec.size >= 4 else None)
+            object_pos = obs_vec[4:7].astype(np.float32, copy=True)
+            info.setdefault("object_pos", object_pos)
+            info.setdefault("peg_pos", object_pos.copy())
+        tcp_center = getattr(self._env, "tcp_center", None)
+        if tcp_center is not None:
+            try:
+                hand_pos = np.asarray(tcp_center, dtype=np.float32).reshape(-1)
+            except Exception:
+                hand_pos = None
+            if hand_pos is not None and hand_pos.size >= 3:
+                hand_pos = hand_pos[:3].astype(np.float32, copy=True)
+                info.setdefault("hand_pos", hand_pos)
+        hand_pos = info.get("hand_pos")
+        object_pos = info.get("object_pos")
+        try:
+            if hand_pos is not None and object_pos is not None:
+                hand_arr = np.asarray(hand_pos, dtype=np.float32).reshape(-1)
+                obj_arr = np.asarray(object_pos, dtype=np.float32).reshape(-1)
+                if hand_arr.size >= 3 and obj_arr.size >= 3:
+                    info.setdefault("hand_object_distance", float(np.linalg.norm(hand_arr[:3] - obj_arr[:3])))
+        except Exception:
+            pass
+
     def reset(self):
         self._env.set_task(self._sample_task())
         obs, _info = self._env.reset(seed=int(self._rng.integers(0, 2**31 - 1)))
@@ -252,10 +282,11 @@ class MetaWorldEnv(BaseEnv):
         action = np.asarray(action, dtype=np.float32).reshape(self._env.action_space.shape)
         action = np.clip(action, self._env.action_space.low, self._env.action_space.high)
 
-        obs, reward, terminated, truncated, info = self._env.step(action)
-        obs = self._extract_obs(obs)
+        raw_obs, reward, terminated, truncated, info = self._env.step(action)
+        obs = self._extract_obs(raw_obs)
         done = bool(terminated or truncated)
         info = dict(info or {})
+        self._enrich_info_with_positions(raw_obs, info)
         if "success" in info:
             info["is_success"] = bool(info["success"])
         return obs, float(reward), done, info

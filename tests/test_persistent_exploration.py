@@ -79,6 +79,40 @@ def test_max_lifetime_forces_reset():
     assert result["reset_reason"] == "max_lifetime"
 
 
+def test_env_done_does_not_reset_when_disabled():
+    env = PersistentExplorationEnv(
+        _DummyEnv(),
+        PersistentExplorationConfig(enabled=True, max_lifetime_steps=10, reset_on_env_done=False),
+    )
+    env.reset()
+    result = env.finalize_step(
+        action=np.zeros(4, dtype=np.float32),
+        next_obs=np.zeros(4, dtype=np.float32),
+        raw_done=True,
+        info={},
+        diagnostics={},
+    )
+    assert result["done"] is False
+    assert result["reset_reason"] == "NA"
+
+
+def test_env_done_resets_when_enabled():
+    env = PersistentExplorationEnv(
+        _DummyEnv(),
+        PersistentExplorationConfig(enabled=True, max_lifetime_steps=10, reset_on_env_done=True),
+    )
+    env.reset()
+    result = env.finalize_step(
+        action=np.zeros(4, dtype=np.float32),
+        next_obs=np.zeros(4, dtype=np.float32),
+        raw_done=True,
+        info={},
+        diagnostics={},
+    )
+    assert result["done"] is True
+    assert result["reset_reason"] == "env_done"
+
+
 def test_stale_window_resets_when_obs_change_too_small():
     env = PersistentExplorationEnv(
         _DummyEnv(),

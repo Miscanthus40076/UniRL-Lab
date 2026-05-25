@@ -94,6 +94,87 @@ _POLICY_SPECS: dict[str, dict[str, PolicyVersionSpec]] = {
             gate_video_module_path="policy.dreamerv3milestoneV1.gate_video_recorder",
         ),
     },
+    "better_dreamerv3milestoneV1": {
+        "v1": PolicyVersionSpec(
+            policy_type="better_dreamerv3milestoneV1",
+            version="v1",
+            module_path="policy.better_dreamerv3milestoneV1",
+            class_name="DreamerV3PolicyFolder",
+            gate_video_module_path="policy.better_dreamerv3milestoneV1.gate_video_recorder",
+        ),
+    },
+    "better_dreamerv3_milestoneV2": {
+        "v1": PolicyVersionSpec(
+            policy_type="better_dreamerv3_milestoneV2",
+            version="v1",
+            module_path="policy.better_dreamerv3_milestoneV2",
+            class_name="DreamerV3PolicyFolder",
+            gate_video_module_path="policy.better_dreamerv3_milestoneV2.gate_video_recorder",
+        ),
+    },
+    "better_dreamerv3_milestoneV3": {
+        "v1": PolicyVersionSpec(
+            policy_type="better_dreamerv3_milestoneV3",
+            version="v1",
+            module_path="policy.better_dreamerv3_milestoneV3",
+            class_name="DreamerV3PolicyFolder",
+            gate_video_module_path="policy.better_dreamerv3_milestoneV3.gate_video_recorder",
+        ),
+    },
+    "better_dreamerv3_by_miscanthus": {
+        "v1": PolicyVersionSpec(
+            policy_type="better_dreamerv3_by_miscanthus",
+            version="v1",
+            module_path="policy.better_dreamerv3_by_miscanthus",
+            class_name="DreamerV3PolicyFolder",
+            gate_video_module_path="policy.better_dreamerv3_by_miscanthus.gate_video_recorder",
+        ),
+    },
+    "better_dreamerv3milestoneV4": {
+        "v1": PolicyVersionSpec(
+            policy_type="better_dreamerv3milestoneV4",
+            version="v1",
+            module_path="policy.better_dreamerv3milestoneV4",
+            class_name="DreamerV3PolicyFolder",
+            gate_video_module_path="policy.better_dreamerv3milestoneV4.gate_video_recorder",
+        ),
+    },
+    "better_dreamerv3milestoneV5": {
+        "v1": PolicyVersionSpec(
+            policy_type="better_dreamerv3milestoneV5",
+            version="v1",
+            module_path="policy.better_dreamerv3milestoneV5",
+            class_name="DreamerV3PolicyFolder",
+            gate_video_module_path="policy.better_dreamerv3milestoneV5.gate_video_recorder",
+        ),
+    },
+    "better_dreamerv3milestoneV6": {
+        "v1": PolicyVersionSpec(
+            policy_type="better_dreamerv3milestoneV6",
+            version="v1",
+            module_path="policy.better_dreamerv3milestoneV6",
+            class_name="DreamerV3PolicyFolder",
+            gate_video_module_path="policy.better_dreamerv3milestoneV6.gate_video_recorder",
+        ),
+    },
+    "better_dreamerv3milestoneV7": {
+        "v1": PolicyVersionSpec(
+            policy_type="better_dreamerv3milestoneV7",
+            version="v1",
+            module_path="policy.better_dreamerv3milestoneV7",
+            class_name="DreamerV3PolicyFolder",
+            gate_video_module_path="policy.better_dreamerv3milestoneV7.gate_video_recorder",
+        ),
+    },
+    "better_dreamerv3milestoneV8": {
+        "v1": PolicyVersionSpec(
+            policy_type="better_dreamerv3milestoneV8",
+            version="v1",
+            module_path="policy.better_dreamerv3milestoneV8",
+            class_name="DreamerV3PolicyFolder",
+            gate_video_module_path="policy.better_dreamerv3milestoneV8.gate_video_recorder",
+        ),
+    },
     "EGO": {
         "v1": PolicyVersionSpec(
             policy_type="EGO",

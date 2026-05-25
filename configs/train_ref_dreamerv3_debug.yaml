@@ -1,0 +1,39 @@
+train:
+  trainer: ref_dreamerv3
+  seed: 0
+  total_steps: 1000
+  max_episode_steps: 500
+env:
+  type: dmcontrol
+  version: v1
+  name: ball_in_cup_catch
+  domain_name: ball_in_cup
+  task_name: catch
+  observation:
+    type: image
+    num_cams: 1
+  render:
+    enabled: false
+    height: 64
+    width: 64
+    camera_id: 0
+    backend: null
+    backend_priority: [egl, osmesa]
+    allow_software_render_fallback: true
+wrappers:
+  - type: simer_to_embodied
+    version: v1
+    obs_key: image
+policy:
+  type: ref_dreamerv3
+  ref_dreamerv3:
+    configs: [defaults, debug]
+    overrides:
+      task: simer_custom
+      jax:
+        platform: cpu
+        prealloc: false
+      run:
+        envs: 1
+        debug: true
+        train_ratio: 8

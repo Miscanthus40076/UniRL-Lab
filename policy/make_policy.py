@@ -26,6 +26,15 @@ def make_policy(config, env, exam_dir=None):
         "dreamerv3milestoneV2",
         "DreamerV3milestoneV3",
         "dreamerv3milestoneV1",
+        "better_dreamerv3milestoneV1",
+        "better_dreamerv3_milestoneV2",
+        "better_dreamerv3_milestoneV3",
+        "better_dreamerv3_by_miscanthus",
+        "better_dreamerv3milestoneV4",
+        "better_dreamerv3milestoneV5",
+        "better_dreamerv3milestoneV6",
+        "better_dreamerv3milestoneV7",
+        "better_dreamerv3milestoneV8",
     }:
         observation_example = env.reset()
         return policy_cls(

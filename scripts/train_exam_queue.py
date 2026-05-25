@@ -28,6 +28,7 @@ WORKER_LOG_PATH = QUEUE_ROOT / "worker.log"
 
 ONLINE_POLICY_TRAINERS = {"online_policy", "default", "single_policy"}
 BIDIRECTIONAL_TRAINERS = {"bidirectional", "bidirectional_online", "bidreamer"}
+REF_DREAMERV3_TRAINERS = {"ref_dreamerv3", "dreamerv3_ref"}
 
 
 def utc_now_iso() -> str:
@@ -138,6 +139,8 @@ def exam_total_units(config: dict) -> tuple[str, int]:
     if name in BIDIRECTIONAL_TRAINERS:
         training_cfg = config.get("training", {})
         return "env_step", int(training_cfg.get("total_env_steps", 0))
+    if name in REF_DREAMERV3_TRAINERS:
+        return "step", int(train_cfg(config).get("total_steps", 0))
     return "unit", 0
 
 

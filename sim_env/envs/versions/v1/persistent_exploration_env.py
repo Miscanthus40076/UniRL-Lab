@@ -235,7 +235,7 @@ class PersistentExplorationEnv(BaseEnv):
             reason = "nan"
         elif self._lifetime_step >= int(self.config.max_lifetime_steps):
             reason = "max_lifetime"
-        elif raw_done:
+        elif raw_done and self.config.reset_on_env_done:
             reason = "env_done"
         elif self.config.stale_reset_enabled and len(self._obs_change_history) >= int(self.config.stale_window):
             stale_mean = float(np.mean(self._obs_change_history))

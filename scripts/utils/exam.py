@@ -5,10 +5,12 @@ import yaml
 
 from policy.registry import resolve_policy_spec
 from sim_env.envs.registry import resolve_env_version
+from sim_env.wrappers.registry import resolve_wrapper_specs, wrapper_config_from_exam
 
 
 STANDARD_TRAINERS = {"online_policy", "default", "single_policy"}
 BIDIRECTIONAL_TRAINERS = {"bidirectional", "bidirectional_online", "bidreamer"}
+REF_DREAMERV3_TRAINERS = {"ref_dreamerv3", "dreamerv3_ref"}
 
 
 def load_config(exam_root, exam_name):
@@ -190,6 +192,32 @@ def _validate_bidirectional_exam_config(config):
     )
 
 
+def _validate_ref_dreamerv3_exam_config(config):
+    train = train_cfg(config)
+    env = config.get("env", {})
+    policy = config.get("policy", {})
+
+    if not isinstance(env, dict):
+        raise TypeError("Config field 'env' must be a mapping")
+    if not isinstance(policy, dict):
+        raise TypeError("Config field 'policy' must be a mapping")
+    if str(policy.get("type", "")).strip() not in {"ref_dreamerv3", "dreamerv3_ref"}:
+        raise ValueError("ref_dreamerv3 trainer requires policy.type = ref_dreamerv3")
+
+    _validate_positive_int("train.total_steps", train.get("total_steps", 0))
+    max_episode_steps = train.get("max_episode_steps")
+    if max_episode_steps is not None and int(max_episode_steps) <= 0:
+        raise ValueError(f"train.max_episode_steps must be > 0 when set, got {max_episode_steps}")
+
+    resolve_env_version(env)
+    wrapper_cfg = wrapper_config_from_exam(config)
+    if wrapper_cfg:
+        resolve_wrapper_specs(wrapper_cfg)
+    ref_cfg = policy.get("ref_dreamerv3", {})
+    if ref_cfg is not None and not isinstance(ref_cfg, dict):
+        raise TypeError("policy.ref_dreamerv3 must be a mapping")
+
+
 def validate_exam_config(config):
     name = trainer_name(config)
     if name in STANDARD_TRAINERS:
@@ -197,6 +225,9 @@ def validate_exam_config(config):
         return
     if name in BIDIRECTIONAL_TRAINERS:
         _validate_bidirectional_exam_config(config)
+        return
+    if name in REF_DREAMERV3_TRAINERS:
+        _validate_ref_dreamerv3_exam_config(config)
         return
     raise ValueError(f"Unsupported trainer: {name}")
 
